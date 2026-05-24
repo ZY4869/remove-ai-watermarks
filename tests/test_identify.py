@@ -6,7 +6,10 @@ against the real committed C2PA / IPTC fixtures in data/samples/.
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -17,6 +20,9 @@ from remove_ai_watermarks.identify import (
     _issuers_in,
     identify,
 )
+
+# Where the lazy import inside identify._visible_sparkle resolves the detector.
+_SPARKLE_TARGET = "remove_ai_watermarks.gemini_engine.detect_sparkle_confidence"
 
 SAMPLES_DIR = Path(__file__).resolve().parent.parent / "data" / "samples"
 
@@ -94,6 +100,16 @@ class TestIdentifyNonPng:
         r = identify(path, check_visible=False)
         assert any("SynthID" in w for w in r.watermarks)
 
+    def test_c2pa_without_ai_marker_is_unknown(self, tmp_path: Path):
+        # Adobe signs C2PA on plain Photoshop edits too. Without an AI digital-
+        # source marker, the honest verdict is unknown -- the C2PA watermark is
+        # still listed, but is_ai_generated is not asserted True.
+        path = self._c2pa_jpeg(tmp_path, b"Adobe ... no ai marker here")
+        r = identify(path, check_visible=False)
+        assert r.is_ai_generated is None
+        assert any("C2PA" in w for w in r.watermarks)
+        assert not any("SynthID" in w for w in r.watermarks)
+
 
 # ── End-to-end verdicts on real fixtures ────────────────────────────
 
@@ -134,3 +150,99 @@ class TestIdentifyRealSamples:
 
     def test_returns_report_dataclass(self):
         assert isinstance(identify(SAMPLES_DIR / "firefly-1.png", check_visible=False), ProvenanceReport)
+
+
+# ── Local diffusion parameters (Stable Diffusion / ComfyUI) ─────────
+
+
+class TestIdentifyLocalParams:
+    """A PNG carrying SD-style generation params is attributed to a local pipeline."""
+
+    def test_sd_params_attributed_to_local_pipeline(self, tmp_png_with_ai_metadata: Path):
+        r = identify(tmp_png_with_ai_metadata, check_visible=False)
+        assert r.is_ai_generated is True
+        assert r.confidence == "high"
+        assert r.platform is not None
+        assert "Stable Diffusion" in r.platform
+        assert any("generation parameters" in w for w in r.watermarks)
+
+    def test_gen_params_signal_lists_keys(self, tmp_png_with_ai_metadata: Path):
+        r = identify(tmp_png_with_ai_metadata, check_visible=False)
+        signal = next(s for s in r.signals if s.name == "gen_params")
+        assert "parameters" in signal.detail
+        assert signal.confidence == "high"
+
+    def test_clean_png_is_unknown(self, tmp_clean_png: Path):
+        r = identify(tmp_clean_png, check_visible=False)
+        assert r.is_ai_generated is None
+        assert r.platform is None
+        assert r.confidence == "none"
+        assert r.signals == []
+
+
+# ── Visible-sparkle fallback (mocked detector) ──────────────────────
+
+
+class TestIdentifyVisibleSparkle:
+    """The visible-sparkle signal gates on the corpus-tuned threshold (0.5)."""
+
+    def test_above_threshold_promotes_to_medium(self, tmp_clean_png: Path):
+        with patch(_SPARKLE_TARGET, return_value=0.7):
+            r = identify(tmp_clean_png, check_visible=True)
+        assert r.is_ai_generated is True
+        assert r.confidence == "medium"
+        assert r.platform is not None
+        assert "Gemini" in r.platform
+        signal = next(s for s in r.signals if s.name == "visible_sparkle")
+        assert signal.confidence == "medium"
+
+    def test_below_threshold_not_promoted(self, tmp_clean_png: Path):
+        with patch(_SPARKLE_TARGET, return_value=0.4):
+            r = identify(tmp_clean_png, check_visible=True)
+        assert r.is_ai_generated is None
+        assert not any(s.name == "visible_sparkle" for s in r.signals)
+
+    def test_detector_unavailable_does_not_crash(self, tmp_clean_png: Path):
+        with patch(_SPARKLE_TARGET, return_value=None):
+            r = identify(tmp_clean_png, check_visible=True)
+        assert r.is_ai_generated is None
+        assert not any(s.name == "visible_sparkle" for s in r.signals)
+
+    def test_check_visible_false_skips_detector(self, tmp_clean_png: Path):
+        # Even a strong detection is ignored when the caller opts out.
+        with patch(_SPARKLE_TARGET, return_value=0.99) as mock_detect:
+            r = identify(tmp_clean_png, check_visible=False)
+        mock_detect.assert_not_called()
+        assert not any(s.name == "visible_sparkle" for s in r.signals)
+
+    def test_metadata_keeps_high_even_with_sparkle(self, tmp_png_with_ai_metadata: Path):
+        # Metadata verdict (high) is not downgraded by an additional sparkle hit.
+        with patch(_SPARKLE_TARGET, return_value=0.7):
+            r = identify(tmp_png_with_ai_metadata, check_visible=True)
+        assert r.confidence == "high"
+
+
+# ── Caveats and serialization ───────────────────────────────────────
+
+
+@pytest.mark.skipif(not SAMPLES_DIR.exists(), reason="data/samples not present")
+class TestIdentifyCaveats:
+    def test_openai_hedge_caveat_present(self):
+        r = identify(SAMPLES_DIR / "chatgpt-1.png", check_visible=False)
+        assert any("before the rollout" in c for c in r.caveats)
+
+    def test_synthid_proxy_caveat_present(self):
+        r = identify(SAMPLES_DIR / "chatgpt-1.png", check_visible=False)
+        assert any("not locally" in c for c in r.caveats)
+
+    def test_caveats_are_deduplicated(self):
+        r = identify(SAMPLES_DIR / "chatgpt-1.png", check_visible=False)
+        assert len(r.caveats) == len(set(r.caveats))
+
+
+class TestReportSerializable:
+    def test_report_is_json_serializable(self, tmp_png_with_ai_metadata: Path):
+        # The CLI --json path relies on asdict + json.dumps(default=str).
+        report = identify(tmp_png_with_ai_metadata, check_visible=False)
+        dumped = json.dumps(asdict(report), default=str)
+        assert "is_ai_generated" in dumped

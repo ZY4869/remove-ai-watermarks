@@ -12,6 +12,7 @@ from remove_ai_watermarks.gemini_engine import (
     WatermarkPosition,
     WatermarkSize,
     _calculate_alpha_map,
+    detect_sparkle_confidence,
     get_watermark_config,
     get_watermark_size,
 )
@@ -172,6 +173,21 @@ class TestDetection:
         # Random image may or may not be detected; confidence should be meaningful
         assert isinstance(result.spatial_score, float)
         assert isinstance(result.gradient_score, float)
+
+
+class TestDetectSparkleConfidence:
+    """File-level entry point used by identify.py."""
+
+    def test_returns_float_in_range_for_real_image(self, tmp_image_path):
+        conf = detect_sparkle_confidence(tmp_image_path)
+        assert conf is not None
+        assert 0.0 <= conf <= 1.0
+
+    def test_returns_none_for_unreadable_file(self, tmp_path):
+        # cv2.imread returns None for a non-image; the helper must not raise.
+        bogus = tmp_path / "not_an_image.png"
+        bogus.write_bytes(b"this is not a PNG")
+        assert detect_sparkle_confidence(bogus) is None
 
 
 # ── Inpainting ──────────────────────────────────────────────────────

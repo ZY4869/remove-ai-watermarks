@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -241,6 +242,36 @@ class TestMetadataCommand:
         )
         assert result.exit_code == 0
         assert "stripped" in result.output
+
+
+class TestIdentifyCommand:
+    """Tests for the 'identify' subcommand."""
+
+    def test_identify_help(self, runner):
+        result = runner.invoke(main, ["identify", "--help"])
+        assert result.exit_code == 0
+
+    def test_identify_clean_png(self, runner, tmp_clean_png):
+        result = runner.invoke(main, ["identify", str(tmp_clean_png), "--no-visible"])
+        assert result.exit_code == 0
+        assert "unknown" in result.output
+
+    def test_identify_ai_png_reports_platform(self, runner, tmp_png_with_ai_metadata):
+        result = runner.invoke(main, ["identify", str(tmp_png_with_ai_metadata), "--no-visible"])
+        assert result.exit_code == 0
+        assert "AI-generated" in result.output
+        assert "Stable Diffusion" in result.output
+
+    def test_identify_json_is_valid(self, runner, tmp_png_with_ai_metadata):
+        result = runner.invoke(main, ["identify", str(tmp_png_with_ai_metadata), "--no-visible", "--json"])
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["is_ai_generated"] is True
+        assert payload["confidence"] == "high"
+
+    def test_identify_nonexistent_file(self, runner):
+        result = runner.invoke(main, ["identify", "/nonexistent/file.png"])
+        assert result.exit_code != 0
 
 
 class TestBatchCommand:
