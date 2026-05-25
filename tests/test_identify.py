@@ -51,6 +51,17 @@ class TestAttributePlatform:
         assert platform
         assert "signer" in platform.lower()
 
+    def test_microsoft_label_is_model_neutral(self):
+        # Bing now runs MAI-Image, not DALL-E; the label must not claim DALL-E.
+        platform = _attribute_platform(["Microsoft"])
+        assert platform
+        assert "DALL-E" not in platform
+
+    def test_stability(self):
+        platform = _attribute_platform(["Stability AI"])
+        assert platform
+        assert "Stability AI" in platform
+
     def test_empty_is_none(self):
         assert _attribute_platform([]) is None
 
@@ -99,6 +110,14 @@ class TestIdentifyNonPng:
         path = self._c2pa_jpeg(tmp_path, b"OpenAI DALL-E ... trainedAlgorithmicMedia")
         r = identify(path, check_visible=False)
         assert any("SynthID" in w for w in r.watermarks)
+
+    def test_stability_ai_issuer_attributed_no_synthid(self, tmp_path: Path):
+        path = self._c2pa_jpeg(tmp_path, b"Stability AI ... trainedAlgorithmicMedia")
+        r = identify(path, check_visible=False)
+        assert r.is_ai_generated is True
+        assert r.platform is not None
+        assert "Stability AI" in r.platform
+        assert not any("SynthID" in w for w in r.watermarks)  # Stability does not use SynthID
 
     def test_c2pa_without_ai_marker_is_unknown(self, tmp_path: Path):
         # Adobe signs C2PA on plain Photoshop edits too. Without an AI digital-

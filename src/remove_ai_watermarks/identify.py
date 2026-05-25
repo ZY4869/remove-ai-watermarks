@@ -50,10 +50,13 @@ _SPARKLE_THRESHOLD = 0.5
 # manifest names several issuers (Microsoft Designer signs as "OpenAI,
 # Microsoft"), the first match wins so the product, not the backend, is named.
 _ISSUER_PLATFORM: tuple[tuple[str, str], ...] = (
-    ("Microsoft", "Microsoft Designer (DALL-E / OpenAI backend)"),
+    # Microsoft signs both Designer and Bing Image Creator; Bing now runs its
+    # own MAI-Image model (not DALL-E), so the label stays model-neutral.
+    ("Microsoft", "Microsoft (Bing Image Creator / Designer)"),
     ("Adobe", "Adobe Firefly"),
     ("OpenAI", "OpenAI (ChatGPT / gpt-image / DALL-E / Sora)"),
     ("Google", "Google (Gemini / Imagen)"),
+    ("Stability AI", "Stability AI (Stable Image / DreamStudio)"),
 )
 
 # PNG-text / EXIF keys that indicate a local diffusion pipeline (vs. a hosted

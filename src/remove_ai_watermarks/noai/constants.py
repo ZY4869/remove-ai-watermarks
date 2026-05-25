@@ -85,6 +85,9 @@ C2PA_ISSUERS = {
     b"Microsoft": "Microsoft",
     b"OpenAI": "OpenAI",
     b"Truepic": "Truepic",
+    # Stability AI signs C2PA as "Stability AI" (cert org "Stability AI Ltd").
+    # Verified on a live Brand Studio (DreamStudio successor) output, 2026-05-24.
+    b"Stability AI": "Stability AI",
 }
 
 # C2PA issuers whose signed outputs also carry an invisible SynthID pixel
