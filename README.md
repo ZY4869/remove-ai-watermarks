@@ -14,6 +14,7 @@ Strips SynthID, C2PA Content Credentials, EXIF/XMP "Made with AI" labels, and vi
 - **Smart Face Protection** — automatic extraction and blending of human faces to prevent AI distortion
 - **Batch processing** — process entire directories
 - **Detection** — three-stage NCC watermark detection with confidence scoring
+- **Provenance detection (`identify`)** — aggregate C2PA issuer, IPTC "Made with AI", embedded SD/ComfyUI params, EXIF/XMP generator tags, the SynthID metadata proxy, the visible sparkle, and the open SD/SDXL/FLUX invisible watermark into one origin-platform + watermark-inventory verdict (`--json` for machine output)
 
 > **Try it online** — don't want to install anything? Use [raiw.cc](https://raiw.cc), a free web service powered by this library.
 
@@ -30,13 +31,19 @@ Strips SynthID, C2PA Content Credentials, EXIF/XMP "Made with AI" labels, and vi
 | **Google Gemini / Nano Banana / Gemini 3 Pro** | ✅ Sparkle logo | ✅ SynthID v1 + v2 (default SDXL pipeline at native ~1024 px) | ✅ C2PA + EXIF | Alpha reversal + diffusion + metadata strip |
 | **OpenAI DALL-E 3 / ChatGPT** | — | — | ✅ C2PA manifest | Metadata strip |
 | **OpenAI ChatGPT Images 2.0** (gpt-image-2) | — | ⚠️ imperceptible pixel watermark (no public detector yet) | ✅ C2PA manifest (verified) | Diffusion regeneration + metadata strip |
-| **Stable Diffusion (AUTOMATIC1111, ComfyUI)** | — | ✅ DWT / steganographic | ✅ PNG text chunks | Diffusion regeneration + metadata strip |
+| **Stable Diffusion / SDXL (AUTOMATIC1111, ComfyUI)** | — | ✅ DWT-DCT (imwatermark — locally detectable) | ✅ PNG text chunks | Diffusion regeneration + metadata strip |
+| **Black Forest Labs FLUX** | — | ✅ DWT-DCT (imwatermark — locally detectable) | ✅ C2PA (FLUX.2 Pro) | Diffusion regeneration + metadata strip |
 | **Adobe Firefly** | — | — | ✅ Content Credentials (C2PA) | Metadata strip |
+| **Stability AI** (DreamStudio / Stable Image) | — | — | ✅ C2PA ("Stability AI Ltd") | Metadata strip |
+| **Microsoft Designer / Bing Image Creator** | — | ✅ SynthID via DALL-E backend (Designer) | ✅ C2PA (Bing runs MAI-Image, signed "Microsoft") | Metadata strip |
 | **Midjourney** | — | — | ✅ EXIF + XMP (prompt, model, seed) | Metadata strip |
+| **Meta AI** | — | — | ✅ IPTC "Made with AI" (digitalSourceType) | Metadata strip (removes the label) |
 | **StableSignature** (Meta) | — | ✅ In-model watermark | — | Diffusion regeneration |
 | **TreeRing** | — | ✅ Latent space watermark | — | Diffusion regeneration |
 
 > Visible watermarks (logo overlays) are currently used only by Google Gemini / Nano Banana. Other services rely on invisible watermarks and/or metadata. Our diffusion-based regeneration works against any invisible watermark in pixel or frequency domain.
+
+> **Detection:** `remove-ai-watermarks identify <image>` reports the origin platform and watermark inventory for all the signals above — C2PA issuer, IPTC "Made with AI", embedded generation params, EXIF/XMP generator tags, the SynthID metadata proxy, the visible sparkle, and (with the `[detect]` extra) the open SD/SDXL/FLUX invisible watermark. The SynthID *pixel* watermark has no local decoder, so it is reported as a metadata proxy only.
 
 ## How it works
 

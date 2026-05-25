@@ -118,22 +118,29 @@ Download; Leonardo serves the original JPEG in-chat (download button matches).
 
 What each platform actually embeds, verified by byte-scan (and Gemini-app oracle
 where noted). The detector's coverage is complementary: metadata catches C2PA /
-IPTC; the visible detector catches the Gemini-family sparkle; the SynthID pixel
-itself has no local detector (oracle only).
+IPTC; `exif_generator` catches EXIF `Make`/`Software` + XMP `CreatorTool`;
+`invisible_watermark.py` (imwatermark) catches the open SD/SDXL/FLUX DWT-DCT
+watermark on pristine files; the visible detector catches the Gemini-family
+sparkle; the SynthID *pixel* itself has no local detector (oracle only).
 
-| Platform | C2PA issuer | SynthID pixel | IPTC "Made with AI" | Visible sparkle | Corpus label |
-|---|---|---|---|---|---|
-| Gemini app | Google | yes | - | yes | pos |
-| ChatGPT / gpt-image | OpenAI | yes | - | - | pos |
-| Microsoft Designer | OpenAI + Microsoft | yes (via OpenAI) | - | - | pos |
-| Google AI Studio (Nano Banana) | **none** | yes (oracle-confirmed) | - | yes | pos (metadata blind spot) |
-| Meta AI | none | no | **yes** | - | neg (for SynthID) |
-| Leonardo.ai | none | no | no | - | neg |
-| Grok (xAI) | none (non-adopter) | no | no | - | neg (captured: clean low-res preview) |
-| Bing Image Creator (DALL-E) | (expect OpenAI, like Designer) | - | - | - | not captured (UI uncooperative) |
+| Platform | C2PA issuer | SynthID pixel | IPTC "Made with AI" | Visible sparkle | imwatermark | Corpus label |
+|---|---|---|---|---|---|---|
+| Gemini app | Google | yes | - | yes | - | pos |
+| ChatGPT / gpt-image | OpenAI | yes | - | - | - | pos |
+| Microsoft Designer | OpenAI + Microsoft | yes (via OpenAI) | - | - | - | pos |
+| Bing Image Creator | Microsoft (MAI-Image) | no | - | - | - | pos (C2PA "Microsoft", not OpenAI) |
+| Google AI Studio (Nano Banana) | **none** | yes (oracle-confirmed) | - | yes | - | pos (metadata blind spot) |
+| Stability AI (Brand Studio) | Stability AI Ltd | no | - | - | no | pos (C2PA only) |
+| Ideogram | none | no | - | - | no | pos (EXIF `Make="Ideogram AI"` only) |
+| Meta AI | none | no | **yes** | - | - | neg (for SynthID) |
+| Leonardo.ai | none | no | no | - | no | neg |
+| Recraft | none (export strips) | no | no | - | no | neg (re-encoded export, no signal) |
+| Krea (FLUX 2 host) | none | no | no | - | no | neg (host omits the imwatermark encoder) |
+| Grok (xAI) | none (non-adopter) | no | no | - | no | neg (captured: clean low-res preview) |
 
 Key takeaways:
 - The same model differs by *surface*: Gemini app wraps C2PA, AI Studio (API/playground) emits none -- only the pixel + sparkle survive.
-- Microsoft Designer's DALL-E backend inherits OpenAI's C2PA+SynthID (issuer "OpenAI, Microsoft").
+- Microsoft Designer's DALL-E backend inherits OpenAI's C2PA+SynthID (issuer "OpenAI, Microsoft"); Bing now runs Microsoft's own **MAI-Image** and signs C2PA as "Microsoft" (not OpenAI/DALL-E).
 - Meta uses the IPTC `digitalSourceType` marker, not C2PA or SynthID.
+- The open imwatermark fires only on *pristine* output from a pipeline that runs the encoder (diffusers default, official BFL) -- not from re-hosts (Krea, Stability hosted SDXL) or re-encoded design exports (Recraft, Canva). Ideogram's only signal is the EXIF `Make` tag.
 - Bing and Grok web UIs are uncooperative for autonomous capture (no document_idle for screenshots; blob downloads intermittently no-op; low-res in-chat previews). Use their native download button manually if a full-res sample is needed.
