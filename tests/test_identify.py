@@ -201,6 +201,78 @@ class TestIdentifyLocalParams:
         assert r.signals == []
 
 
+# ── China TC260 AIGC label as a PNG text chunk (Doubao) ─────────────
+
+
+class TestIdentifyAigcPngChunk:
+    """The raw-JSON ``AIGC`` PNG chunk (no namespaced XMP marker) is a high-
+    confidence AI verdict, same as the XMP form."""
+
+    def _aigc_chunk_png(self, tmp_path: Path) -> Path:
+        from PIL import Image
+        from PIL.PngImagePlugin import PngInfo
+
+        p = tmp_path / "doubao_chunk.png"
+        pnginfo = PngInfo()
+        pnginfo.add_text("AIGC", json.dumps({"Label": "1", "ContentProducer": "doubao"}))
+        Image.new("RGB", (32, 32)).save(p, pnginfo=pnginfo)
+        return p
+
+    def test_png_chunk_detected_high(self, tmp_path: Path):
+        r = identify(self._aigc_chunk_png(tmp_path), check_visible=False)
+        assert r.is_ai_generated is True
+        assert r.confidence == "high"
+        assert r.platform is not None
+        assert "AIGC" in r.platform
+        signal = next(s for s in r.signals if s.name == "aigc")
+        assert "doubao" in signal.detail
+
+
+# ── HuggingFace-hosted job marker (medium confidence) ───────────────
+
+
+class TestIdentifyHuggingFaceJob:
+    """The hf-job-id chunk lifts an otherwise-Unknown verdict to a tentative
+    (medium) AI, never overriding a high-confidence metadata signal."""
+
+    def _hf_png(self, tmp_path: Path) -> Path:
+        from PIL import Image
+        from PIL.PngImagePlugin import PngInfo
+
+        p = tmp_path / "hfjob.png"
+        pnginfo = PngInfo()
+        pnginfo.add_text("hf-job-id", "ec8380a6-2091-423a-b835-209420f99ee1")
+        Image.new("RGB", (32, 32)).save(p, pnginfo=pnginfo)
+        return p
+
+    def test_hf_job_promotes_to_medium(self, tmp_path: Path):
+        r = identify(self._hf_png(tmp_path), check_visible=False)
+        assert r.is_ai_generated is True
+        assert r.confidence == "medium"
+        assert r.platform is not None
+        assert "HuggingFace" in r.platform
+        signal = next(s for s in r.signals if s.name == "hf_job")
+        assert signal.confidence == "medium"
+
+    def test_hf_job_caveat_present(self, tmp_path: Path):
+        r = identify(self._hf_png(tmp_path), check_visible=False)
+        assert any("hf-job-id" in c for c in r.caveats)
+
+    def test_metadata_keeps_high_even_with_hf_job(self, tmp_png_with_ai_metadata: Path):
+        # A high-confidence metadata verdict is not downgraded by an hf-job hit.
+        from PIL import Image
+        from PIL.PngImagePlugin import PngInfo
+
+        img = Image.open(tmp_png_with_ai_metadata)
+        pnginfo = PngInfo()
+        for k, v in img.text.items():
+            pnginfo.add_text(k, v)
+        pnginfo.add_text("hf-job-id", "ec8380a6-2091-423a-b835-209420f99ee1")
+        img.save(tmp_png_with_ai_metadata, pnginfo=pnginfo)
+        r = identify(tmp_png_with_ai_metadata, check_visible=False)
+        assert r.confidence == "high"
+
+
 # ── Visible-sparkle fallback (mocked detector) ──────────────────────
 
 

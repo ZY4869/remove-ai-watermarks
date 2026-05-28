@@ -108,6 +108,27 @@ AIGC_MARKERS: tuple[bytes, ...] = (
     b"TC260:AIGC",
 )
 
+# TC260 AIGC-label JSON fields (the standard's labeling object). Doubao writes
+# the same object as a PNG ``tEXt`` chunk keyed ``AIGC`` (raw JSON, not XMP), so
+# a JSON object carrying at least one of these is accepted as a valid TC260
+# label even when the namespaced XMP element is absent.
+_TC260_FIELDS: frozenset[str] = frozenset(
+    {
+        "Label",
+        "ContentProducer",
+        "ProduceID",
+        "ContentPropagator",
+        "PropagateID",
+        "ReservedCode1",
+        "ReservedCode2",
+    }
+)
+
+# HuggingFace-hosted GPU jobs (Jobs / Spaces) stamp generated PNGs with this
+# ``tEXt`` chunk key holding the job UUID. It marks the hosting job, not a
+# specific model -- a medium-confidence AI signal (commonly diffusion output).
+_HF_JOB_KEY: str = "hf-job-id"
+
 STANDARD_METADATA_KEYS: frozenset[str] = frozenset(
     [
         "Author",
@@ -202,31 +223,90 @@ def has_ai_metadata(image_path: Path) -> bool:
     # IPTC 2025.1 AI-disclosure XMP properties (their presence flags AI content).
     if any(marker in data for marker in IPTC_AI_FIELD_MARKERS):
         return True
+    # China TC260 AIGC label as a PNG text chunk (the byte scan above catches
+    # only the XMP form; the raw-JSON tEXt chunk needs the PIL-based parse).
+    if aigc_label(image_path):
+        return True
+    # HuggingFace-hosted job marker (hf-job-id PNG text chunk).
+    if huggingface_job(image_path):
+        return True
     # xAI / Grok: no C2PA/IPTC/XMP -- only the EXIF Signature + UUID-Artist pair.
     return xai_signature(image_path)
 
 
 def aigc_label(image_path: Path) -> dict[str, str] | None:
-    """Parse a China TC260 ``<TC260:AIGC>`` AI-labeling block, if present.
+    """Parse a China TC260 AI-labeling block, if present.
+
+    Two serializations are recognized:
+
+    - a PNG ``tEXt``/``iTXt`` chunk keyed ``AIGC`` carrying the raw JSON object
+      (as written by Doubao / ByteDance), read via PIL; and
+    - an XMP ``<TC260:AIGC>{...}</TC260:AIGC>`` block (HTML-entity encoded text),
+      found by a container-agnostic raw-byte scan (PNG/JPEG/WebP alike).
 
     Returns the decoded JSON (e.g. ``{"Label": "1", "ContentProducer": ...}``)
-    or None. The block is XMP text (HTML-entity encoded), so it is found by a
-    container-agnostic raw-byte scan and works for PNG/JPEG/WebP alike.
+    or None. The PNG-chunk key ``AIGC`` is generic, so a JSON object there is
+    accepted only if it carries at least one known TC260 field (``_TC260_FIELDS``);
+    the namespaced XMP element is unambiguous, so any JSON object is accepted.
     """
     import html
     import json
-    import re
+    from typing import cast
 
+    def _parse(text: str, *, require_tc260_field: bool) -> dict[str, str] | None:
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        fields = {str(k): str(v) for k, v in cast("dict[object, object]", parsed).items()}
+        if require_tc260_field and not (_TC260_FIELDS & fields.keys()):
+            return None
+        return fields
+
+    # PNG tEXt chunk keyed "AIGC" with raw JSON (Doubao and other China gens).
+    # The key is generic, so require a TC260 field to avoid a false positive.
+    try:
+        from PIL import Image
+
+        with Image.open(image_path) as img:
+            value = img.info.get("AIGC")
+    except Exception as exc:
+        logger.debug("PIL could not open %s for AIGC chunk scan: %s", image_path, exc)
+        value = None
+    if isinstance(value, str) and (result := _parse(value, require_tc260_field=True)):
+        return result
+
+    # XMP <TC260:AIGC>{...}</TC260:AIGC> block (namespaced element, unambiguous).
     data = scan_head(image_path)
     match = re.search(rb"<TC260:AIGC>(.*?)</TC260:AIGC>", data, re.DOTALL)
     if not match:
         return None
-    raw = html.unescape(match.group(1).decode("utf-8", "replace"))
+    return _parse(html.unescape(match.group(1).decode("utf-8", "replace")), require_tc260_field=False)
+
+
+def huggingface_job(image_path: Path) -> str | None:
+    """Return the HuggingFace job id if the image carries an ``hf-job-id`` PNG
+    text chunk, else None.
+
+    HuggingFace-hosted GPU jobs (Jobs / Spaces) stamp generated PNGs with an
+    ``hf-job-id`` ``tEXt`` chunk holding the job's UUID. It identifies the
+    *hosting job*, not a specific model, and is most commonly seen on diffusion-
+    generation output -- a medium-confidence AI signal, not proof of AI pixels
+    on its own.
+    """
     try:
-        parsed = json.loads(raw)
-    except ValueError:
+        from PIL import Image
+
+        with Image.open(image_path) as img:
+            value = img.info.get(_HF_JOB_KEY)
+    except Exception as exc:
+        logger.debug("PIL could not open %s for hf-job-id scan: %s", image_path, exc)
         return None
-    return {str(k): str(v) for k, v in parsed.items()} if isinstance(parsed, dict) else None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 def iptc_ai_system(image_path: Path) -> str | None:
@@ -500,6 +580,10 @@ def get_ai_metadata(image_path: Path) -> dict[str, str]:
     # IPTC 2025.1 AI-disclosure XMP fields (Iptc4xmpExt:AISystemUsed etc.).
     if system := iptc_ai_system(image_path):
         result.setdefault("ai_system", f"IPTC 2025.1 AI disclosure ({system})")
+
+    # HuggingFace-hosted job marker (hf-job-id PNG text chunk).
+    if job := huggingface_job(image_path):
+        result.setdefault("huggingface_job", f"HuggingFace-hosted job ({job})")
     return result
 
 

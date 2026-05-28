@@ -554,6 +554,88 @@ class TestAIGCLabel:
         assert "aigc_label" in meta
         assert "TC260" in meta["aigc_label"]
 
+    def _aigc_chunk_png(self, tmp_path: Path, producer: str = "doubao") -> Path:
+        """Doubao writes the TC260 object as a PNG ``tEXt`` chunk keyed ``AIGC``
+        with raw JSON (no XMP, no namespaced marker)."""
+        import json
+
+        p = tmp_path / "doubao_chunk.png"
+        pnginfo = PngInfo()
+        pnginfo.add_text(
+            "AIGC",
+            json.dumps({"Label": "1", "ContentProducer": producer, "ProduceID": "abc123"}),
+        )
+        Image.new("RGB", (32, 32)).save(p, pnginfo=pnginfo)
+        return p
+
+    def test_parses_png_text_chunk_form(self, tmp_path: Path):
+        from remove_ai_watermarks.metadata import aigc_label
+
+        info = aigc_label(self._aigc_chunk_png(tmp_path))
+        assert info is not None
+        assert info["Label"] == "1"
+        assert info["ContentProducer"] == "doubao"
+
+    def test_png_chunk_without_tc260_field_ignored(self, tmp_path: Path):
+        """A generic ``AIGC`` chunk with no TC260 field must not false-positive."""
+        import json
+
+        from remove_ai_watermarks.metadata import aigc_label
+
+        p = tmp_path / "unrelated.png"
+        pnginfo = PngInfo()
+        pnginfo.add_text("AIGC", json.dumps({"unrelated": "value"}))
+        Image.new("RGB", (32, 32)).save(p, pnginfo=pnginfo)
+        assert aigc_label(p) is None
+
+    def test_has_ai_metadata_detects_png_chunk_form(self, tmp_path: Path):
+        assert has_ai_metadata(self._aigc_chunk_png(tmp_path))
+
+    def test_remove_strips_png_chunk_form(self, tmp_path: Path):
+        from remove_ai_watermarks.metadata import aigc_label, remove_ai_metadata
+
+        out = tmp_path / "clean.png"
+        remove_ai_metadata(self._aigc_chunk_png(tmp_path), out)
+        assert aigc_label(out) is None
+        assert not has_ai_metadata(out)
+
+
+class TestHuggingFaceJob:
+    """HuggingFace-hosted job marker (``hf-job-id`` PNG text chunk)."""
+
+    def _hf_png(self, tmp_path: Path, job_id: str = "ec8380a6-2091-423a-b835-209420f99ee1") -> Path:
+        p = tmp_path / "hfjob.png"
+        pnginfo = PngInfo()
+        pnginfo.add_text("hf-job-id", job_id)
+        Image.new("RGB", (32, 32)).save(p, pnginfo=pnginfo)
+        return p
+
+    def test_returns_job_id(self, tmp_path: Path):
+        from remove_ai_watermarks.metadata import huggingface_job
+
+        assert huggingface_job(self._hf_png(tmp_path)) == "ec8380a6-2091-423a-b835-209420f99ee1"
+
+    def test_none_when_absent(self, tmp_clean_png):
+        from remove_ai_watermarks.metadata import huggingface_job
+
+        assert huggingface_job(tmp_clean_png) is None
+
+    def test_has_ai_metadata_detects_hf_job(self, tmp_path: Path):
+        assert has_ai_metadata(self._hf_png(tmp_path))
+
+    def test_get_ai_metadata_surfaces_hf_job(self, tmp_path: Path):
+        meta = get_ai_metadata(self._hf_png(tmp_path))
+        assert "huggingface_job" in meta
+        assert "ec8380a6" in meta["huggingface_job"]
+
+    def test_remove_strips_hf_job(self, tmp_path: Path):
+        from remove_ai_watermarks.metadata import huggingface_job, remove_ai_metadata
+
+        out = tmp_path / "clean.png"
+        remove_ai_metadata(self._hf_png(tmp_path), out)
+        assert huggingface_job(out) is None
+        assert not has_ai_metadata(out)
+
 
 @pytest.mark.skipif(not (SAMPLES_DIR / "doubao-1.png").exists(), reason="doubao sample not present")
 class TestAIGCRealSample:

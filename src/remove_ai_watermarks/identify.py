@@ -31,6 +31,7 @@ from remove_ai_watermarks.metadata import (
     aigc_label,
     exif_generator,
     get_ai_metadata,
+    huggingface_job,
     iptc_ai_system,
     scan_head,
     xai_signature,
@@ -88,6 +89,11 @@ _IPTC_ONLY_CAVEAT = "The IPTC 'Made with AI' tag flags AI provenance but does no
 _INVISIBLE_WM_CAVEAT = (
     "The open invisible watermark is fragile: it does not survive JPEG re-encoding "
     "or resizing, so it confirms origin only on a pristine (un-re-encoded) file."
+)
+_HF_JOB_CAVEAT = (
+    "The hf-job-id tag marks a HuggingFace-hosted job (commonly diffusion "
+    "generation) but names neither the model nor the content type, so it is a "
+    "medium-confidence signal, not proof the pixels are AI-generated."
 )
 
 
@@ -423,9 +429,14 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
             ai_vendor_claims["iptc_ai_system"] = v
 
     # ── China TC260 AIGC label (Doubao and other China-served gens) ──
-    aigc = any(m in head for m in AIGC_MARKERS)
+    # Fire on either the namespaced byte marker (``TC260:AIGC`` / the TC260 ns
+    # URL, present in XMP and as a laundering tell even when the JSON payload is
+    # truncated) OR the parsed label, which additionally catches the raw-JSON
+    # PNG ``AIGC`` tEXt chunk that carries no namespaced marker at all.
+    aigc_data = aigc_label(image_path)
+    aigc = aigc_data is not None or any(m in head for m in AIGC_MARKERS)
     if aigc:
-        producer = (aigc_label(image_path) or {}).get("ContentProducer", "")
+        producer = (aigc_data or {}).get("ContentProducer", "")
         signals.append(Signal("aigc", f"TC260 AIGC label{f' (producer {producer})' if producer else ''}", "high"))
         watermarks.append("China AIGC label (TC260 standard)")
         if platform is None:
@@ -460,6 +471,18 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
         if platform is None:
             platform = "xAI (Grok / Aurora)"
         ai_vendor_claims["xai"] = "xAI"
+
+    # ── HuggingFace-hosted job marker (hf-job-id PNG text chunk) ─────
+    # Marks the hosting job, not a model -- medium confidence (commonly diffusion
+    # output). Like the visible sparkle, it lifts an otherwise-Unknown verdict to
+    # a tentative AI, but never overrides a high-confidence metadata signal.
+    hf_job = huggingface_job(image_path)
+    if hf_job:
+        signals.append(Signal("hf_job", f"HuggingFace job {hf_job}", "medium"))
+        watermarks.append("HuggingFace-hosted job (hf-job-id)")
+        caveats.append(_HF_JOB_CAVEAT)
+        if platform is None:
+            platform = "HuggingFace-hosted job (model not identified)"
 
     # ── Open invisible watermark (SD / SDXL / FLUX, dwtDct) ──────────
     # Public decoder, no key -- a definitive embedded signal on pristine files.
@@ -503,11 +526,12 @@ def identify(image_path: Path, *, check_visible: bool = True, check_invisible: b
             platform = "Google Gemini family (visible sparkle detected)"
 
     visible_only = any(s.name == "visible_sparkle" for s in signals) and not ai_from_metadata
+    hf_only = bool(hf_job) and not ai_from_metadata
 
     if ai_from_metadata:
         is_ai: bool | None = True
         confidence = "high"
-    elif visible_only:
+    elif visible_only or hf_only:
         is_ai = True
         confidence = "medium"
     else:

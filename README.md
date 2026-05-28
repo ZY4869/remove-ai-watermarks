@@ -25,7 +25,7 @@ If this tool saves you time, consider [sponsoring its development](https://githu
 - **Smart Face Protection** — automatic extraction and blending of human faces to prevent AI distortion
 - **Batch processing** — process entire directories
 - **Detection** — three-stage NCC watermark detection with confidence scoring
-- **Provenance detection (`identify`)** — aggregate C2PA issuer, the C2PA soft-binding forensic-watermark vendor (Adobe TrustMark, Digimarc, Imatag, ...), IPTC "Made with AI" plus the IPTC 2025.1 `AISystemUsed` field, embedded SD/ComfyUI params, EXIF/XMP generator tags, the xAI/Grok EXIF signature, the SynthID metadata proxy, the visible sparkle, the open SD/SDXL/FLUX invisible watermark, and (with the `trustmark` extra) the open Adobe TrustMark watermark into one origin-platform + watermark-inventory verdict (`--json` for machine output)
+- **Provenance detection (`identify`)** — aggregate C2PA issuer, the C2PA soft-binding forensic-watermark vendor (Adobe TrustMark, Digimarc, Imatag, ...), IPTC "Made with AI" plus the IPTC 2025.1 `AISystemUsed` field, embedded SD/ComfyUI params, EXIF/XMP generator tags, the xAI/Grok EXIF signature, the China TC260 AIGC label (XMP or PNG chunk), the HuggingFace `hf-job-id` job marker, the SynthID metadata proxy, the visible sparkle, the open SD/SDXL/FLUX invisible watermark, and (with the `trustmark` extra) the open Adobe TrustMark watermark into one origin-platform + watermark-inventory verdict (`--json` for machine output)
 
 ## Examples
 
@@ -48,13 +48,13 @@ If this tool saves you time, consider [sponsoring its development](https://githu
 | **xAI Grok (Aurora)** | — | — | ✅ EXIF signature scheme (no C2PA): `Signature:` blob + UUID `Artist` | Detected (`identify`); metadata strip |
 | **Midjourney** | — | — | ✅ EXIF + XMP (prompt, model, seed) | Metadata strip |
 | **Meta AI** | — | — | ✅ IPTC "Made with AI" (digitalSourceType) | Metadata strip (removes the label) |
-| **Doubao** (ByteDance) / China AIGC generators | ✅ "豆包AI生成" text strip (bottom-right) | — | ✅ TC260 `<TC260:AIGC>` XMP label (China's mandatory AI labeling) | Locate + mask + inpaint (cv2, CPU) + metadata strip |
+| **Doubao** (ByteDance) / China AIGC generators | ✅ "豆包AI生成" text strip (bottom-right) | — | ✅ TC260 AIGC label — `<TC260:AIGC>` XMP **or** `AIGC` PNG chunk (China's mandatory AI labeling) | Locate + mask + inpaint (cv2, CPU) + metadata strip |
 | **StableSignature** (Meta) | — | ✅ In-model watermark | — | Diffusion regeneration |
 | **TreeRing** | — | ✅ Latent space watermark | — | Diffusion regeneration |
 
 > Visible overlays are used by Google Gemini / Nano Banana (sparkle logo) and by Doubao / China AIGC generators (the mandated "...AI生成" corner text). Both are removed deterministically on CPU. Other services rely on invisible watermarks and/or metadata; our diffusion-based regeneration works against any invisible watermark in pixel or frequency domain. For a visible mark from any other source (any position, any colour), use the universal `erase --region` command.
 
-> **Detection:** `remove-ai-watermarks identify <image>` reports the origin platform and watermark inventory for all the signals above — C2PA issuer, the C2PA soft-binding forensic-watermark vendor (TrustMark / Digimarc / Imatag / ...), IPTC "Made with AI" plus the IPTC 2025.1 `AISystemUsed` field, the China TC260 AIGC label, embedded generation params, EXIF/XMP generator tags, the xAI/Grok EXIF signature, the SynthID metadata proxy, the visible sparkle, and (with the `[detect]` / `[trustmark]` extras) the open SD/SDXL/FLUX and Adobe TrustMark invisible watermarks. SynthID and the proprietary soft-binding watermarks (Digimarc etc.) have no local decoder, so they are reported by metadata proxy / vendor name only.
+> **Detection:** `remove-ai-watermarks identify <image>` reports the origin platform and watermark inventory for all the signals above — C2PA issuer, the C2PA soft-binding forensic-watermark vendor (TrustMark / Digimarc / Imatag / ...), IPTC "Made with AI" plus the IPTC 2025.1 `AISystemUsed` field, the China TC260 AIGC label (XMP or PNG chunk), the HuggingFace `hf-job-id` job marker, embedded generation params, EXIF/XMP generator tags, the xAI/Grok EXIF signature, the SynthID metadata proxy, the visible sparkle, and (with the `[detect]` / `[trustmark]` extras) the open SD/SDXL/FLUX and Adobe TrustMark invisible watermarks. SynthID and the proprietary soft-binding watermarks (Digimarc etc.) have no local decoder, so they are reported by metadata proxy / vendor name only.
 
 ## How it works
 
