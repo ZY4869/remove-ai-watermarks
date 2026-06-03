@@ -19,6 +19,7 @@ never as "clean". See CLAUDE.md "SynthID detection is metadata-only".
 
 from __future__ import annotations
 
+import itertools
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -282,6 +283,17 @@ def _vendor_of(text: str | None) -> str | None:
     return None
 
 
+# Clash-detection provenance sources. Rule 1 (below) flags two AI vendors only
+# when they come from *independent* signals. The C2PA issuer attribution and the
+# SynthID proxy are NOT independent -- the proxy is inferred from the same C2PA
+# manifest -- so they share one source. A multi-actor manifest (a product wrapping
+# another vendor's engine, e.g. Microsoft+OpenAI or Microsoft+Google; or an edit
+# chain like Adobe over a Gemini original) legitimately names several vendors in
+# one valid chain and must not read as spoofing. Families not listed here are each
+# their own independent source (EXIF/XMP generator, IPTC AISystemUsed, AIGC, ...).
+_CLASH_SOURCE: dict[str, str] = {"c2pa": "c2pa_manifest", "synthid": "c2pa_manifest"}
+
+
 def _integrity_clashes(
     ai_vendors: dict[str, str], camera_label: str | None, *, camera_has_ai_marker: bool
 ) -> list[str]:
@@ -301,10 +313,18 @@ def _integrity_clashes(
     """
     clashes: list[str] = []
 
-    by_vendor: dict[str, list[str]] = {}
-    for family, vendor in ai_vendors.items():
-        by_vendor.setdefault(vendor, []).append(family)
-    if len(by_vendor) >= 2:
+    # Rule 1: two genuinely INDEPENDENT signals naming different AI vendors. Two
+    # families clash only when they belong to different provenance sources (see
+    # _CLASH_SOURCE) AND name different vendors -- so multiple vendors named within
+    # one C2PA manifest (c2pa issuer + synthid proxy) do not flag.
+    source = {fam: _CLASH_SOURCE.get(fam, fam) for fam in ai_vendors}
+    independent_conflict = any(
+        source[a] != source[b] and ai_vendors[a] != ai_vendors[b] for a, b in itertools.combinations(ai_vendors, 2)
+    )
+    if independent_conflict:
+        by_vendor: dict[str, list[str]] = {}
+        for family, vendor in ai_vendors.items():
+            by_vendor.setdefault(vendor, []).append(family)
         parts = [f"{vendor} (via {', '.join(sorted(fams))})" for vendor, fams in sorted(by_vendor.items())]
         clashes.append(
             "Conflicting AI-origin attributions from independent signals: "

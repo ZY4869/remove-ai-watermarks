@@ -731,6 +731,28 @@ class TestIntegrityClashesHelper:
         # C2PA Google + SynthID-Google proxy is consistent, not a contradiction.
         assert _integrity_clashes({"c2pa": "Google", "synthid": "Google"}, None, camera_has_ai_marker=True) == []
 
+    def test_multi_actor_manifest_no_clash(self):
+        # A multi-actor C2PA manifest names a product + the engine it wraps in ONE
+        # valid chain (Microsoft Designer on OpenAI, Microsoft on Google, Adobe over
+        # a Gemini original). The c2pa issuer attribution and the SynthID proxy share
+        # the same manifest source, so the differing vendors must NOT read as a clash.
+        for c2pa_vendor, synthid_vendor in (("Microsoft", "OpenAI"), ("Microsoft", "Google"), ("Adobe", "Google")):
+            assert (
+                _integrity_clashes({"c2pa": c2pa_vendor, "synthid": synthid_vendor}, None, camera_has_ai_marker=True)
+                == []
+            )
+
+    def test_manifest_vendor_vs_independent_signal_clashes(self):
+        # A vendor named only inside the manifest still clashes with a genuinely
+        # independent stamp (here an EXIF/XMP generator tag) naming a third vendor.
+        clashes = _integrity_clashes(
+            {"c2pa": "Microsoft", "synthid": "Google", "exif_generator": "Ideogram"},
+            None,
+            camera_has_ai_marker=True,
+        )
+        assert len(clashes) == 1
+        assert "Ideogram" in clashes[0]
+
     def test_single_vendor_no_clash(self):
         assert _integrity_clashes({"c2pa": "OpenAI"}, None, camera_has_ai_marker=True) == []
 
