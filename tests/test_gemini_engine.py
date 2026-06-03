@@ -284,3 +284,68 @@ class TestOverSubtractionGuard:
         dark, dpos = self._composite_sparkle(bg_value=60)
         dalpha = self.engine.get_interpolated_alpha(dpos[2])
         assert self.engine._reverse_alpha_oversubtracts(dark, dalpha, (dpos[0], dpos[1])) is True
+
+
+class TestCornerPromotion:
+    """Issue #36: a small sparkle in the corner must not be lost to a larger decoy.
+
+    The size weight that suppresses tiny-patch false positives also lets a larger,
+    mediocre match elsewhere outrank a small, near-perfect sparkle in the corner --
+    so a faint sparkle on a busy background (e.g. a portrait whose bright collar
+    out-scores it) reads as clean. The corner-promotion override rescues it.
+    """
+
+    _W, _H = 400, 520
+    _CORNER = (_W - 40 - 20, _H - 40 - 20, 20)  # bottom-right small sparkle (x, y, scale)
+    _DECOY = (15, 210, 92)  # large decoy: inside the search window, left of the corner
+
+    @pytest.fixture(autouse=True)
+    def _setup_engine(self):
+        self.engine = GeminiEngine()
+
+    def _paste(self, img: np.ndarray, scale: int, x: int, y: int, alpha_scale: float) -> None:
+        tmpl = cv2.resize(self.engine._alpha_large, (scale, scale), interpolation=cv2.INTER_AREA)
+        a = (tmpl * alpha_scale)[:, :, None]
+        roi = img[y : y + scale, x : x + scale]
+        img[y : y + scale, x : x + scale] = a * 255.0 + (1.0 - a) * roi
+
+    def _scene(self, bg_value: int = 40) -> np.ndarray:
+        """Dark scene with a large decoy on the left and a small sparkle in the corner.
+
+        Without the corner-promotion fix the global, size-weighted search locks onto
+        the larger decoy; with it the small corner sparkle wins.
+        """
+        img = np.full((self._H, self._W, 3), bg_value, dtype=np.float32)
+        self._paste(img, self._DECOY[2], self._DECOY[0], self._DECOY[1], 0.55)
+        self._paste(img, self._CORNER[2], self._CORNER[0], self._CORNER[1], 0.55)
+        return np.clip(img, 0, 255).astype(np.uint8)
+
+    def _in_bottom_right(self, region: tuple[int, int, int, int]) -> bool:
+        x, y = region[0], region[1]
+        return x >= self._W * 0.6 and y >= self._H * 0.6
+
+    def test_small_corner_sparkle_is_detected_and_localized(self):
+        det = self.engine.detect_watermark(self._scene())
+        assert det.detected
+        # Must localize to the planted corner sparkle, not the larger left-side decoy.
+        assert self._in_bottom_right(det.region), f"localized to decoy, not corner: {det.region}"
+        assert abs(det.region[0] - self._CORNER[0]) < 16
+        assert abs(det.region[1] - self._CORNER[1]) < 16
+
+    def test_promotion_is_what_rescues_it(self, monkeypatch):
+        """Guard the mechanism: disabling the override mislocalizes to the decoy.
+
+        Proves the scene genuinely needs the override (so the localization test above
+        is not a fluke): with the gate set unreachable the larger decoy wins.
+        """
+        scene = self._scene()
+        assert self._in_bottom_right(self.engine.detect_watermark(scene).region)
+        monkeypatch.setattr(GeminiEngine, "_CORNER_PROMOTE_NCC", 2.0)
+        assert not self._in_bottom_right(self.engine.detect_watermark(scene).region), (
+            "decoy expected to win without the override"
+        )
+
+    def test_no_promotion_on_clean_flat_image(self):
+        """A flat image with no sparkle yields no corner match to promote."""
+        flat = np.full((self._H, self._W, 3), 40, dtype=np.uint8)
+        assert self.engine._corner_promote(flat, -1.0) is None

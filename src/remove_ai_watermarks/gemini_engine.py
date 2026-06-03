@@ -29,6 +29,8 @@ import cv2
 import numpy as np
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
@@ -138,6 +140,34 @@ class GeminiEngine:
     # gate separates them with a wide margin.
     _OVERSUB_FOOTPRINT_FRAC = 0.05
 
+    # Corner promotion (issue #36): the size weight that suppresses tiny-patch
+    # false positives also buries a small, near-perfect sparkle when a larger,
+    # mediocre match sits elsewhere (e.g. a bright collar in a portrait). A small
+    # faint sparkle on a busy background therefore loses the global argmax and the
+    # image reads as clean -- the regression osachub reported when the search
+    # window widened 256px -> 512px (v0.7.2's tighter window still found it).
+    # Remedy: if the bottom-right corner holds a very-high-fidelity raw-NCC match,
+    # trust it regardless of size, without reverting the wider window (which is
+    # needed for variant margins). The threshold sits midway between the worst
+    # real-photo corner match (~0.78 across native + downscaled real photos) and a
+    # genuine faint sparkle (~0.93), so it adds true detections without adding
+    # false ones; it only ever overrides a lower-fidelity global pick, so it cannot
+    # weaken an existing detection.
+    _CORNER_PROMOTE_NCC = 0.85
+    # Bottom-right corner side for the promotion search, as a fraction of the
+    # image's short side, clamped to an absolute pixel band. Relative so the corner
+    # stays a true corner at every scale: a fixed 256 px is a genuine corner on a
+    # large image but covers ~70% of a small portrait, where a busy real photo can
+    # then raw-match the star template at ~0.81 (only 0.04 below the promote gate).
+    # Scaling the side down on small images drops that worst case to ~0.69, while
+    # the upper clamp stops it ballooning on huge images (more corner area = more
+    # random texture to false-match -- a real photo reached ~0.83 at 512 px). The
+    # Gemini sparkle sits ~60-160 px from the corner (fixed margins, not
+    # proportional), and the [96, 384] band covers that at every measured size.
+    _CORNER_PROMOTE_FRAC = 0.20
+    _CORNER_PROMOTE_MIN = 96
+    _CORNER_PROMOTE_MAX = 384
+
     def __init__(self, logo_value: float = 255.0) -> None:
         """Initialize the engine with embedded alpha maps.
 
@@ -183,6 +213,24 @@ class GeminiEngine:
 
     # ── Detection ────────────────────────────────────────────────────
 
+    def _scan_scales(self, gray: NDArray[Any]) -> Iterator[tuple[int, float, tuple[int, int]]]:
+        """Yield ``(scale, max_ncc, max_loc)`` for the alpha template matched at each scale.
+
+        Shared multi-scale ``TM_CCOEFF_NORMED`` primitive over a normalized [0, 1]
+        grayscale region, used by both the size-weighted global search in
+        ``detect_watermark`` and the raw-NCC corner pass in ``_corner_promote`` --
+        each applies its own scoring/argmax to the yielded values. The 96x96
+        ``_alpha_large`` is the high-quality source downscaled per scale; the range
+        covers aggressively downscaled to slightly upscaled logos.
+        """
+        for scale in range(16, 120, 2):
+            if scale > gray.shape[0] or scale > gray.shape[1]:
+                continue
+            tmpl = cv2.resize(self._alpha_large, (scale, scale), interpolation=cv2.INTER_AREA)
+            match_res = cv2.matchTemplate(gray, tmpl, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(match_res)
+            yield scale, float(max_val), max_loc
+
     def detect_watermark(
         self,
         image: NDArray[Any],
@@ -197,9 +245,6 @@ class GeminiEngine:
         h, w = image.shape[:2]
         base_size = force_size or get_watermark_size(w, h)
         result.size = base_size
-
-        # Use large alpha template (96x96) as the high-quality source for downscaling
-        source_alpha = self._alpha_large
 
         # Dynamically search bottom-right corner. 512 covers up to 512px from the
         # corner -- enough for known Gemini margin variations (standard: 64+96=160px;
@@ -216,25 +261,15 @@ class GeminiEngine:
 
         gray_sr_f = gray_sr.astype(np.float32) / 255.0
 
-        # Phase 1 & 2: Multi-scale spatial NCC search
+        # Phase 1 & 2: multi-scale spatial NCC search, size-weighted argmax.
         best_scale = 0
         best_score = -1.0
         best_raw_ncc = -1.0
         best_loc = (0, 0)
-
-        # Search scales from 16 to 120 (covering aggressively downscaled or slightly upscaled logos)
-        for scale in range(16, 120, 2):
-            if scale > search_region.shape[0] or scale > search_region.shape[1]:
-                continue
-
-            tmpl = cv2.resize(source_alpha, (scale, scale), interpolation=cv2.INTER_AREA)
-            match_res = cv2.matchTemplate(gray_sr_f, tmpl, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, max_loc = cv2.minMaxLoc(match_res)
-
+        for scale, max_val, max_loc in self._scan_scales(gray_sr_f):
             # Size-adjusted score to overcome NCC bias toward tiny patches (mimics C++ weight)
             weight = min(1.0, (scale / 96.0) ** 0.5)
             adj_val = max_val * weight
-
             if adj_val > best_score:
                 best_score = adj_val
                 best_scale = scale
@@ -244,6 +279,14 @@ class GeminiEngine:
         # Exact dynamic location & size
         pos_x = sx1 + best_loc[0]
         pos_y = sy1 + best_loc[1]
+
+        # Corner promotion: a near-perfect but small sparkle in the bottom-right
+        # corner is otherwise outranked by a larger, mediocre size-weighted match
+        # (see _CORNER_PROMOTE_NCC). Override the global pick with it when present.
+        promoted = self._corner_promote(image, best_raw_ncc)
+        if promoted is not None:
+            best_scale, pos_x, pos_y, best_raw_ncc = promoted
+
         result.region = (pos_x, pos_y, best_scale, best_scale)
         result.spatial_score = float(best_raw_ncc)
 
@@ -316,6 +359,42 @@ class GeminiEngine:
         )
 
         return result
+
+    def _corner_promote(
+        self,
+        image: NDArray[Any],
+        current_raw_ncc: float,
+    ) -> tuple[int, int, int, float] | None:
+        """Search the bottom-right corner for a very-high-fidelity sparkle match.
+
+        Returns ``(scale, x, y, raw_ncc)`` when the corner holds a match with raw
+        NCC >= ``_CORNER_PROMOTE_NCC`` that beats the global pick's ``current_raw_ncc``,
+        else None. Used to rescue a small sparkle that the size weight buried under
+        a larger, lower-fidelity match elsewhere. See ``_CORNER_PROMOTE_NCC`` and
+        ``_CORNER_PROMOTE_FRAC`` for the corner sizing.
+        """
+        h, w = image.shape[:2]
+        side = max(
+            self._CORNER_PROMOTE_MIN, min(self._CORNER_PROMOTE_MAX, round(min(w, h) * self._CORNER_PROMOTE_FRAC))
+        )
+        cs = int(min(min(w, h), side))
+        cx1, cy1 = max(0, w - cs), max(0, h - cs)
+        corner = image[cy1:h, cx1:w]
+        gray = cv2.cvtColor(corner, cv2.COLOR_BGR2GRAY) if corner.ndim == 3 and corner.shape[2] >= 3 else corner
+        gray = gray.astype(np.float32) / 255.0
+
+        best_raw = -1.0
+        best_scale = 0
+        best_loc = (0, 0)
+        for scale, max_val, max_loc in self._scan_scales(gray):
+            if max_val > best_raw:
+                best_raw = max_val
+                best_scale = scale
+                best_loc = max_loc
+
+        if best_raw >= self._CORNER_PROMOTE_NCC and best_raw > current_raw_ncc:
+            return best_scale, cx1 + best_loc[0], cy1 + best_loc[1], float(best_raw)
+        return None
 
     # ── Removal ──────────────────────────────────────────────────────
 
