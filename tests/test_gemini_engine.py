@@ -286,6 +286,66 @@ class TestOverSubtractionGuard:
         assert self.engine._reverse_alpha_oversubtracts(dark, dalpha, (dpos[0], dpos[1])) is True
 
 
+class TestUnderSubtractionGain:
+    """Under-subtraction fix: a sparkle MORE opaque than the captured alpha must not
+    survive removal. The captured alpha (~0.51) under-represents such marks, so the
+    fixed-alpha reverse blend leaves a bright residual; the per-image gain scales the
+    alpha up to match this image's opacity. Mirror of TestOverSubtractionGuard.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup_engine(self):
+        self.engine = GeminiEngine()
+
+    def _composite_sparkle(self, bg_value: int, alpha_scale: float, size: int = 1400):
+        """Flat ``bg_value`` image with the sparkle composited at ``alpha_scale`` opacity.
+
+        ``alpha_scale`` > 1 makes the mark MORE opaque than the engine's captured alpha,
+        reproducing the under-subtraction case (real under-removed marks estimate ~1.47).
+        """
+        img = np.full((size, size, 3), bg_value, dtype=np.float32)
+        config = get_watermark_config(size, size)
+        x, y = config.get_position(size, size)
+        alpha = self.engine.get_alpha_map(WatermarkSize.LARGE)
+        ah, aw = alpha.shape[:2]
+        a = np.clip(alpha * alpha_scale, 0.0, 1.0)[:, :, None]
+        roi = img[y : y + ah, x : x + aw]
+        img[y : y + ah, x : x + aw] = a * 255.0 + (1.0 - a) * roi
+        return np.clip(img, 0, 255).astype(np.uint8), (x, y, aw, ah)
+
+    def test_more_opaque_sparkle_estimates_gain_above_deadband(self):
+        image, pos = self._composite_sparkle(bg_value=80, alpha_scale=1.3)
+        alpha = self.engine.get_interpolated_alpha(pos[2])
+        gain = self.engine._estimate_alpha_gain(image, alpha, (pos[0], pos[1]))
+        assert gain > self.engine._ALPHA_GAIN_DEADBAND, f"gain {gain} did not exceed deadband"
+
+    def test_matching_sparkle_estimates_unit_gain(self):
+        """A sparkle that matches the captured opacity gets ~1.0 (no scaling)."""
+        image, pos = self._composite_sparkle(bg_value=80, alpha_scale=1.0)
+        alpha = self.engine.get_interpolated_alpha(pos[2])
+        gain = self.engine._estimate_alpha_gain(image, alpha, (pos[0], pos[1]))
+        assert gain <= self.engine._ALPHA_GAIN_DEADBAND, f"matching sparkle scaled by {gain}"
+
+    def test_more_opaque_sparkle_is_removed(self):
+        """The gain-scaled removal clears a more-opaque sparkle without a black pit.
+
+        Asserted on the footprint PIXELS, not the detector: the detector's NCC is
+        degenerate on a perfectly flat synthetic background (zero-variance regions
+        spuriously match), so a re-detect conf is meaningless here -- on real textured
+        images the same removal drops the detector from ~0.80 to ~0.27 (spaces corpus).
+        """
+        image, (x, y, w, h) = self._composite_sparkle(bg_value=80, alpha_scale=1.3)
+        assert self.engine.detect_watermark(image).detected
+        before_max = int(image[y : y + h, x : x + w].max())  # bright sparkle present
+        assert before_max > 150
+        out = self.engine.remove_watermark(image)
+        footprint = out[y : y + h, x : x + w]
+        # Sparkle gone: no bright residual, no black pit, footprint reads like the bg.
+        assert int(footprint.max()) < 80 + 30, f"bright residual: max={footprint.max()}"
+        assert int(footprint.min()) > 25, f"black pit: min={footprint.min()}"
+        assert abs(float(footprint.mean()) - 80.0) < 20.0
+
+
 class TestCornerPromotion:
     """Issue #36: a small sparkle in the corner must not be lost to a larger decoy.
 

@@ -140,6 +140,23 @@ class GeminiEngine:
     # gate separates them with a wide margin.
     _OVERSUB_FOOTPRINT_FRAC = 0.05
 
+    # Per-image alpha gain (under-subtraction fix). The captured alpha peaks ~0.51
+    # (a ~51%-opaque sparkle). Some real Gemini sparkles are rendered MORE opaque,
+    # so the fixed alpha under-subtracts and reverse-alpha leaves a bright residual
+    # the detector still fires on (~11% of marks on the spaces corpus). Estimate
+    # this image's effective sparkle opacity from the bright core vs the local
+    # background and scale the alpha to match, capped so alpha stays < 0.99. The
+    # gain is clamped to >= 1.0 so it only ever STRENGTHENS removal: ~1.0 when the
+    # sparkle matches the capture (working cases unchanged), >1 when more opaque.
+    # On the spaces corpus the gain cleanly separates -- under-removed marks ~1.47,
+    # cleanly-removed ~1.00. 1.94 is the cap that reaches alpha 0.99 from 0.51.
+    _ALPHA_GAIN_MAX = 1.94
+    _ALPHA_GAIN_CORE_FRAC = 0.8  # body pixels at >= this * peak alpha define the core
+    # Deadband: apply the gain only above this, so a sparkle that already matches the
+    # capture (estimated gain ~1.0-1.04 from background noise) stays byte-identical to
+    # the pre-fix output. Under-removed marks estimate >= 1.26, well clear of the band.
+    _ALPHA_GAIN_DEADBAND = 1.05
+
     # Corner promotion (issue #36): the size weight that suppresses tiny-patch
     # false positives also buries a small, near-perfect sparkle when a larger,
     # mediocre match sits elsewhere (e.g. a bright collar in a portrait). A small
@@ -446,6 +463,12 @@ class GeminiEngine:
 
         pos = (detection.region[0], detection.region[1])
         alpha_map = self.get_interpolated_alpha(detection.region[2])
+        # Match the captured alpha to this image's sparkle opacity (under-subtraction
+        # fix): a more-opaque-than-captured sparkle would otherwise leave a bright
+        # residual. gain == 1.0 leaves the working cases byte-identical.
+        gain = self._estimate_alpha_gain(result, alpha_map, pos)
+        if gain > self._ALPHA_GAIN_DEADBAND:
+            alpha_map = np.clip(alpha_map * gain, 0.0, 0.99)
         logger.debug(
             "Removing watermark at (%d, %d) size %dx%d [conf=%.3f]",
             pos[0],
@@ -524,6 +547,49 @@ class GeminiEngine:
         ax1, ay1 = x1 - x, y1 - y
         alpha_roi = alpha_map[ay1 : ay1 + (y2 - y1), ax1 : ax1 + (x2 - x1)]
         return alpha_roi, (y1, y2, x1, x2)
+
+    def _estimate_alpha_gain(
+        self,
+        image: NDArray[Any],
+        alpha_map: NDArray[Any],
+        position: tuple[int, int],
+    ) -> float:
+        """Scale factor matching the captured alpha to this image's sparkle opacity.
+
+        The captured alpha (peak ~0.51) under-represents sparkles rendered more
+        opaque; reverse-alpha then leaves a bright residual. Estimate the effective
+        opacity at the sparkle core (observed brightness vs the local background
+        ring) and return ``a_eff / a_capture``, clamped to ``[1.0, _ALPHA_GAIN_MAX]``
+        so it only ever STRENGTHENS removal (1.0 = no change on a matching sparkle).
+        Returns 1.0 when the background cannot be estimated reliably.
+        """
+        placed = self._footprint_indices(alpha_map, position, image.shape)
+        if placed is None:
+            return 1.0
+        alpha_roi, (y1, y2, x1, x2) = placed
+        a_cap = float(alpha_roi.max())
+        if a_cap < 0.2:
+            return 1.0
+        gray = image.astype(np.float32).mean(axis=2)
+        core = alpha_roi >= a_cap * self._ALPHA_GAIN_CORE_FRAC
+        if not bool(core.any()):
+            return 1.0
+        core_obs = float(np.percentile(gray[y1:y2, x1:x2][core], 75))
+        # Local background = a ring just outside the footprint box.
+        ih, iw = image.shape[:2]
+        pad = int((x2 - x1) * 0.7)
+        ry1, ry2 = max(0, y1 - pad), min(ih, y2 + pad)
+        rx1, rx2 = max(0, x1 - pad), min(iw, x2 + pad)
+        ring = gray[ry1:ry2, rx1:rx2]
+        ring_mask = np.ones(ring.shape, dtype=bool)
+        ring_mask[y1 - ry1 : y2 - ry1, x1 - rx1 : x2 - rx1] = False
+        if int(ring_mask.sum()) < 10:
+            return 1.0
+        bg = float(np.median(ring[ring_mask]))
+        if 255.0 - bg < 5.0:
+            return 1.0
+        a_eff = float(np.clip((core_obs - bg) / (255.0 - bg), 0.0, 0.99))
+        return float(np.clip(a_eff / a_cap, 1.0, self._ALPHA_GAIN_MAX))
 
     def _reverse_alpha_oversubtracts(
         self,
