@@ -570,7 +570,7 @@ table.
 schedule to `resolve_strength`, do not reuse the default ladder; (2) the
 `--restore-faces` pass is now SynthID-safe by construction (the GFPGAN-on-original
 path that re-added SynthID was removed 2026-06-04; the shipped restore is
-PhotoMaker-V1, identity-as-embedding, see `synthid-robust-identity-research.md`); (3)
+GFPGAN-on-cleaned, see `face_restore.py`); (3)
 removal near threshold is seed-non-deterministic -> FIX the prod seed (kills the
 coin-flip; ship a deterministic certified config).
 

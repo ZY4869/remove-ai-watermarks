@@ -124,11 +124,13 @@ Gemini app; the two payloads are vendor-specific and never cross-checked):
 - **Fix the seed in prod.** The non-determinism is purely `seed=None` (random); a fixed
   `--seed` makes every run reproduce the certified-clean result, so you ship a
   deterministic, re-certifiable config (and the seed sweep collapses to one config).
-- **`--restore-faces` is SynthID-safe by construction now (PhotoMaker-V1, 2026-06-04).**
-  The GFPGAN-on-original path that re-added SynthID was removed; the shipped restore
-  carries identity in a SynthID-invariant OpenCLIP embedding and regenerates fresh
-  pixels conditioned on it. Needs the `photomaker` extra. See
-  `docs/synthid-robust-identity-research.md`.
+- **`--restore-faces` is SynthID-safe by construction now (GFPGAN-on-cleaned, 2026-06-04).**
+  The GFPGAN-on-original path that re-added SynthID was fixed by running GFPGAN on the
+  diffusion-CLEANED image instead — the input pixels GFPGAN derives from are already
+  SynthID-free, so the partial pixel-blend cannot transport the watermark. Needs the
+  `restore` extra. (The PhotoMaker-V1 identity-as-embedding alternative was researched
+  but blocked by upstream / diffusers-version compatibility issues; see
+  `docs/synthid-robust-identity-research.md`.)
 - **No local SynthID detector exists** → the service can't self-verify; bake in strength
   margin and periodic oracle spot-checks.
 - **Lesson:** visual-quality / face-identity recovery does NOT prove removal — only the

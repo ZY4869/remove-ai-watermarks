@@ -76,42 +76,22 @@ lama = [
     "onnxruntime>=1.16.0",
     "huggingface-hub>=0.20.0",
 ]
-# Optional PhotoMaker-V2 face-identity restoration (commercial-safe end-to-end:
-# PhotoMaker-V2 weights Apache-2.0 + OpenCLIP-ViT-H/14 MIT, NO InsightFace). Carries
-# identity in a SEMANTIC EMBEDDING and generates fresh face pixels conditioned on it
-# -- so the pixel watermark is not transported. Empirically validated 2026-06-04: the
-# OpenCLIP embedding changes by cosine 0.002 under SynthID-magnitude pixel noise (an
-# order of magnitude less than JPEG90 drift, which SynthID survives). Replaces the
-# removed `restore` (GFPGAN) extra, which ran on the watermarked ORIGINAL and was
-# oracle-confirmed to re-introduce SynthID. See
-# docs/synthid-robust-identity-research.md and
-# src/remove_ai_watermarks/photomaker_restore.py. Weights (~3 GB SDXL + ~1 GB
-# PhotoMaker-V2 adapter) download on first use; never bundled. Kept OUT of `all`
-# (heavy + model download), same as `esrgan`.
-photomaker = [
-    "photomaker @ git+https://github.com/TencentARC/PhotoMaker.git",
-    "huggingface-hub>=0.20.0",
-    # Upstream PhotoMaker imports `einops` but doesn't declare it in its install_requires
-    # (verified 2026-06-04: cert sweep failed with "No module named 'einops'").
-    "einops>=0.7.0",
-    # `insightface` is the upstream PyPI package's CODE (MIT). PhotoMaker's package
-    # __init__.py unconditionally `from .insightface_package import FaceAnalysis2`,
-    # so just IMPORTING the V1 pipeline class requires `insightface` to be importable
-    # -- we never actually call `FaceAnalysis()` (which is what would trigger the
-    # non-commercial model-pack download), so the legal status of the *models* does
-    # not bind us. The code itself is MIT. See `photomaker_restore.py` for the V1-only
-    # call path. Without this dep the cert sweep fails with
-    # "No module named 'insightface'" (caught empirically 2026-06-04).
-    "insightface>=0.7.3",
-    # `insightface` pulls onnxruntime as a runtime dep for the FaceAnalysis class. We
-    # never instantiate that class, but the import has to resolve, so we pin it
-    # explicitly (already pinned by the `lama` extra; pinned here too so this extra is
-    # self-contained without depending on `lama`).
-    "onnxruntime>=1.16.0",
-    # `peft` is required by diffusers' `pipe.fuse_lora()` (PhotoMaker adapter ships
-    # LoRA weights for the SDXL UNet). Without it the load chain raises
-    # "PEFT backend is required for this method." (caught empirically 2026-06-04).
-    "peft>=0.10.0",
+# Optional GFPGAN face-polish post-pass (commercial-safe: GFPGAN Apache-2.0 +
+# RetinaFace MIT). Polishes face detail in the DIFFUSION-CLEANED image (not the
+# original) using GFPGAN's StyleGAN2 prior, so SynthID is NOT re-introduced -- the
+# input pixels GFPGAN derives from are already SynthID-free. This is the shipped path
+# because the alternative we wanted (PhotoMaker-V1 identity-as-embedding) has
+# significant upstream / diffusers-version compatibility issues; see
+# `src/remove_ai_watermarks/face_restore.py` and
+# `docs/synthid-robust-identity-research.md`. gfpgan/basicsr/facexlib are an OLD
+# ecosystem and pin numpy<2: scipy<1.18 (>=1.18 uses np.long, gone in numpy 1.24-1.26)
+# and numba<0.60. Kept OUT of `all` (heavy + model download).
+restore = [
+    "gfpgan>=1.3.8",
+    "facexlib>=0.3.0",
+    "basicsr>=1.4.2",
+    "scipy<1.18",
+    "numba<0.60",
 ]
 # Optional pre-diffusion super-resolution for small inputs (Real-ESRGAN). Loaded via
 # spandrel (MIT) -- a pure model-loader with NO basicsr dependency (it pulls only
@@ -140,6 +120,14 @@ all = ["remove-ai-watermarks[gpu,detect,trustmark,lama,dev]"]
 # stable safetensors pin (or once safetensors 0.8.0 stable is out).
 [tool.uv]
 prerelease = "allow"
+
+# basicsr 1.4.2 (pulled by the `restore` GFPGAN extra) ships sdist-only and its
+# setup.py get_version() reads basicsr/version.py in a way that newer setuptools
+# (>= 69) breaks with ``KeyError: '__version__'`` under isolated PEP 517 builds.
+# Pin an old setuptools as its build dependency so the sdist builds; this is
+# scoped to basicsr and does not affect the rest of the resolution.
+[tool.uv.extra-build-dependencies]
+basicsr = ["setuptools<69"]
 
 # PyTorch Intel-GPU (XPU) wheel index. ``explicit = true`` keeps it inert for
 # the default CPU/CUDA install: uv consults it only when a torch install
@@ -170,12 +158,6 @@ Repository = "https://github.com/wiltodelta/remove-ai-watermarks"
 # `requires = ["hatchling"]` once that release confirms the path.
 requires = ["hatchling<1.31"]
 build-backend = "hatchling.build"
-
-# Allow the `photomaker` extra to reference its upstream git URL directly (the
-# TencentARC/PhotoMaker package is not on PyPI). Apache-2.0; weights download on
-# first use, so this only adds the Python wrapper.
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/remove_ai_watermarks"]

@@ -238,18 +238,16 @@ def _warn_if_esrgan_unavailable(upscaler: str) -> None:
 def _restore_faces_options(f: Any) -> Any:
     """Attach the face-restoration flag to an invisible-pipeline command.
 
-    PhotoMaker-V2 is the only restoration method shipped (the prior GFPGAN path was
-    oracle-confirmed to re-introduce SynthID by partial pixel blending and has been
-    removed). PhotoMaker carries identity in a SynthID-invariant OpenCLIP embedding
-    and regenerates fresh face pixels conditioned on it -- see
-    ``docs/synthid-robust-identity-research.md``.
+    The post-pass runs GFPGAN on the DIFFUSION-CLEANED image (not the original), so
+    SynthID is not re-introduced (the input pixels GFPGAN derives from are already
+    SynthID-free). See ``face_restore.py``.
     """
     return click.option(
         "--restore-faces/--no-restore-faces",
         default=False,
-        help="EXPERIMENTAL, opt-in. Restore face identity with the PhotoMaker-V2 post-pass "
-        "when faces are present (needs the 'photomaker' extra); off by default, auto-skips "
-        "when no face is detected or the extra is absent.",
+        help="EXPERIMENTAL, opt-in. Polish face detail with a GFPGAN post-pass on the "
+        "cleaned image when faces are present (needs the 'restore' extra); off by default, "
+        "auto-skips when no face is detected or the extra is absent.",
     )(f)
 
 
