@@ -318,9 +318,15 @@ def restore_faces_photomaker(
         id_crop_rgb = cv2.cvtColor(id_crop_bgr, cv2.COLOR_BGR2RGB)
         id_image_pil = Image.fromarray(id_crop_rgb)
 
+        # Don't pass negative_prompt: the PhotoMaker pipeline manages its own CFG by
+        # concatenating [negative_prompt_embeds, prompt_embeds]; if we pass a custom
+        # negative the upstream code splits text_only vs id-injected branches and
+        # the resulting embed batch dims can mismatch (we saw
+        # "Sizes of tensors must match except in dimension 1. Expected size 2 but got
+        # size 1" on a real run). The default empty negative is what the upstream
+        # gradio demo uses.
         out = pipeline(
             prompt=_PHOTOMAKER_PROMPT,
-            negative_prompt=_PHOTOMAKER_NEGATIVE,
             input_id_images=[id_image_pil],
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
