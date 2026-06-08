@@ -108,6 +108,10 @@ photomaker = [
     # explicitly (already pinned by the `lama` extra; pinned here too so this extra is
     # self-contained without depending on `lama`).
     "onnxruntime>=1.16.0",
+    # `peft` is required by diffusers' `pipe.fuse_lora()` (PhotoMaker adapter ships
+    # LoRA weights for the SDXL UNet). Without it the load chain raises
+    # "PEFT backend is required for this method." (caught empirically 2026-06-04).
+    "peft>=0.10.0",
 ]
 # Optional pre-diffusion super-resolution for small inputs (Real-ESRGAN). Loaded via
 # spandrel (MIT) -- a pure model-loader with NO basicsr dependency (it pulls only
