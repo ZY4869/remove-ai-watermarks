@@ -151,11 +151,17 @@ def _get_pipeline() -> Any:
                 )
             adapter_path = hf_hub_download(repo_id=_PHOTOMAKER_REPO, filename=_PHOTOMAKER_FILE)
             pipe = PhotoMakerStableDiffusionXLPipeline.from_pretrained(_SDXL_MODEL_ID, torch_dtype=dtype)
+            # ``pm_version="v1"`` is REQUIRED: the upstream loader defaults to v2 and would
+            # build the V2 encoder (PhotoMakerIDEncoder_CLIPInsightfaceExtendtoken), then
+            # error on load_state_dict because the v1 weights have a different shape.
+            # Passing v1 builds the CLIP-only PhotoMakerIDEncoder, which is the
+            # commercial-safe path we want.
             pipe.load_photomaker_adapter(
                 str(Path(adapter_path).parent),
                 subfolder="",
                 weight_name=_PHOTOMAKER_FILE,
                 trigger_word="img",
+                pm_version="v1",
             )
             pipe.to(device)
             pipe.fuse_lora()
