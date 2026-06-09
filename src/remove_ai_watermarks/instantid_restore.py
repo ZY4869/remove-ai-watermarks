@@ -64,7 +64,7 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from remove_ai_watermarks.photomaker_restore import _composite_faces, _face_crop_square
+from remove_ai_watermarks.photomaker_restore import _face_crop_square
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
