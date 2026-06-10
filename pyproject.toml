@@ -1,19 +1,48 @@
 [project]
 name = "remove-ai-watermarks"
 version = "0.10.1"
-description = "Remove visible and invisible AI watermarks from images (Gemini / Nano Banana, ChatGPT, Stable Diffusion)"
+description = "AI watermark remover: strip visible and invisible AI watermarks (Gemini / Nano Banana sparkle, SynthID) and provenance metadata (C2PA, EXIF) from images"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
+keywords = [
+    "ai-watermark",
+    "ai-watermark-remover",
+    "watermark-remover",
+    "watermark-removal",
+    "remove-watermark",
+    "synthid",
+    "c2pa",
+    "content-credentials",
+    "nano-banana",
+    "gemini",
+    "gemini-watermark",
+    "ai-metadata",
+    "metadata-removal",
+    "provenance",
+    "exif",
+    "stable-diffusion",
+    "comfyui",
+    "ai-detection",
+]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Multimedia :: Graphics",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Security",
+    "Topic :: Utilities",
 ]
 dependencies = [
     "pillow>=10.0.0",
