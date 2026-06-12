@@ -218,6 +218,16 @@ class GeminiEngine:
     _CORNER_PROMOTE_MIN = 96
     _CORNER_PROMOTE_MAX = 384
 
+    # Number of top size-weighted spatial candidates scored by full fusion before one
+    # is selected. The single size-weighted argmax can bury a genuine mid-size sparkle
+    # under a LARGER, lower-fidelity shape match (the 256->512 search-widening
+    # regression: a real corner sparkle at raw ~0.77 lost to a decoy at raw ~0.63).
+    # Scoring the top-K by gradient-bearing fusion rescues it. Top-K (NOT the raw-NCC
+    # argmax) keeps the tiny-patch suppression intact: a coincidental 16 px match never
+    # ranks in the size-weighted top-K, so widening selection cannot add a false
+    # positive on non-Gemini content (verified on the doubao/jimeng visible corpora).
+    _SELECT_TOPK = 3
+
     def __init__(self, logo_value: float = 255.0) -> None:
         """Initialize the engine with embedded alpha maps.
 
@@ -316,91 +326,65 @@ class GeminiEngine:
 
         gray_sr_f = gray_sr.astype(np.float32) / 255.0
 
-        # Phase 1 & 2: multi-scale spatial NCC search, size-weighted argmax.
-        best_scale = 0
-        best_score = -1.0
-        best_raw_ncc = -1.0
-        best_loc = (0, 0)
+        # Phase 1 & 2: multi-scale spatial NCC search. The size weight (mimicking the
+        # C++ vendor weight) overcomes the NCC bias toward tiny patches, but its single
+        # argmax can bury a genuine mid-size sparkle under a LARGER, lower-fidelity
+        # shape match (the 256->512 search-widening regression). So score the top-K
+        # size-weighted candidates by the FULL fusion and keep the highest -- the
+        # gradient term separates a true white sparkle from a shape-only decoy. See
+        # _SELECT_TOPK for why top-K (not the raw-NCC argmax) preserves tiny-patch
+        # suppression and so cannot add a false positive on non-Gemini content.
+        scored: list[tuple[float, int, int, int, float]] = []  # (adj, scale, raw, x, y)
         for scale, max_val, max_loc in self._scan_scales(gray_sr_f):
-            # Size-adjusted score to overcome NCC bias toward tiny patches (mimics C++ weight)
-            weight = min(1.0, (scale / 96.0) ** 0.5)
-            adj_val = max_val * weight
-            if adj_val > best_score:
-                best_score = adj_val
-                best_scale = scale
-                best_loc = max_loc
-                best_raw_ncc = max_val
+            adj_val = max_val * min(1.0, (scale / 96.0) ** 0.5)
+            scored.append((adj_val, scale, max_val, sx1 + max_loc[0], sy1 + max_loc[1]))
+        scored.sort(reverse=True)
 
-        # Exact dynamic location & size
-        pos_x = sx1 + best_loc[0]
-        pos_y = sy1 + best_loc[1]
+        # Top-K candidates at distinct locations (NMS: drop a lower-ranked match that
+        # overlaps an already-kept one -- the same sparkle matches at adjacent scales).
+        candidates: list[tuple[int, int, int, float]] = []
+        for _adj, scale, raw, x, y in scored:
+            if any(
+                abs(x - px) < 0.5 * max(scale, ps) and abs(y - py) < 0.5 * max(scale, ps)
+                for ps, px, py, _ in candidates
+            ):
+                continue
+            candidates.append((scale, x, y, raw))
+            if len(candidates) >= self._SELECT_TOPK:
+                break
 
-        # Corner promotion: a near-perfect but small sparkle in the bottom-right
-        # corner is otherwise outranked by a larger, mediocre size-weighted match
-        # (see _CORNER_PROMOTE_NCC). Override the global pick with it when present.
-        promoted = self._corner_promote(image, best_raw_ncc)
+        # Corner promotion: a near-perfect small bottom-right sparkle the size weight
+        # buries even below the top-K (see _CORNER_PROMOTE_NCC) -- add it as a candidate.
+        promoted = self._corner_promote(image, candidates[0][3] if candidates else -1.0)
         if promoted is not None:
-            best_scale, pos_x, pos_y, best_raw_ncc = promoted
+            candidates.append(promoted)
+
+        # Select the candidate with the highest full-fusion confidence (pre-FP-gate).
+        best_scale, pos_x, pos_y, best_raw_ncc = candidates[0]
+        grad_score, var_score, best_fused = 0.0, 0.0, -1.0
+        for c_scale, c_x, c_y, c_raw in candidates:
+            if c_raw < 0.25:
+                c_grad, c_var, c_fused = 0.0, 0.0, max(0.0, c_raw * 0.5)
+            else:
+                c_grad, c_var = self._grad_var_scores(image, c_scale, c_x, c_y)
+                c_fused = c_raw * 0.50 + c_grad * 0.30 + c_var * 0.20
+            if c_fused > best_fused:
+                best_fused = c_fused
+                best_scale, pos_x, pos_y = c_scale, c_x, c_y
+                best_raw_ncc, grad_score, var_score = c_raw, c_grad, c_var
 
         result.region = (pos_x, pos_y, best_scale, best_scale)
         result.spatial_score = float(best_raw_ncc)
-
-        # Generate exact alpha map for matched size
-        alpha_region = self.get_interpolated_alpha(best_scale)
-
-        # Extract exactly the matched region for Gradient & Variance analysis
-        x1 = pos_x
-        y1 = pos_y
-        x2 = min(w, x1 + best_scale)
-        y2 = min(h, y1 + best_scale)
-
-        region = image[y1:y2, x1:x2]
-        if len(region.shape) == 3 and region.shape[2] >= 3:
-            gray_region = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-        else:
-            gray_region = region.copy()
-
-        gray_f = gray_region.astype(np.float32) / 255.0
-
-        # Adjust alpha_region if clipped by image boundary (rare, but possible)
-        ay1, ax1 = 0, 0
-        alpha_region = alpha_region[ay1 : ay1 + (y2 - y1), ax1 : ax1 + (x2 - x1)]
+        result.gradient_score = float(grad_score)
+        result.variance_score = float(var_score)
 
         if result.spatial_score < 0.25:
             result.confidence = float(max(0.0, result.spatial_score * 0.5))
             return result
 
-        # ── Stage 2: Gradient NCC ────────────────────────────────────
-        img_gx = cv2.Sobel(gray_f, cv2.CV_32F, 1, 0, ksize=3)
-        img_gy = cv2.Sobel(gray_f, cv2.CV_32F, 0, 1, ksize=3)
-        img_gmag = cv2.magnitude(img_gx, img_gy)
-
-        alpha_gx = cv2.Sobel(alpha_region, cv2.CV_32F, 1, 0, ksize=3)
-        alpha_gy = cv2.Sobel(alpha_region, cv2.CV_32F, 0, 1, ksize=3)
-        alpha_gmag = cv2.magnitude(alpha_gx, alpha_gy)
-
-        grad_match = cv2.matchTemplate(img_gmag, alpha_gmag, cv2.TM_CCOEFF_NORMED)
-        _, grad_score, _, _ = cv2.minMaxLoc(grad_match)
-        result.gradient_score = float(grad_score)
-
-        # ── Stage 3: Variance Analysis ───────────────────────────────
-        var_score = 0.0
-        ref_h = min(y1, best_scale)
-
-        if ref_h > 8:
-            ref_region = image[y1 - ref_h : y1, x1:x2]
-            gray_ref = cv2.cvtColor(ref_region, cv2.COLOR_BGR2GRAY) if len(ref_region.shape) == 3 else ref_region
-
-            _, s_wm = cv2.meanStdDev(gray_region)
-            _, s_ref = cv2.meanStdDev(gray_ref)
-
-            if s_ref[0][0] > 5.0:
-                var_score = max(0.0, min(1.0, 1.0 - (s_wm[0][0] / s_ref[0][0])))
-
-        result.variance_score = float(var_score)
-
         # ── Fusion ───────────────────────────────────────────────────
-        confidence = result.spatial_score * 0.50 + result.gradient_score * 0.30 + var_score * 0.20
+        # best_fused is the selected candidate's spatial*0.5 + grad*0.3 + var*0.2.
+        confidence = best_fused
 
         # False-positive gate: a low-confidence shape match whose core is NOT brighter
         # than its surroundings is a content false positive, not a white sparkle overlay.
@@ -428,6 +412,49 @@ class GeminiEngine:
         )
 
         return result
+
+    def _grad_var_scores(
+        self,
+        image: NDArray[Any],
+        scale: int,
+        pos_x: int,
+        pos_y: int,
+    ) -> tuple[float, float]:
+        """Return ``(gradient_score, variance_score)`` for a candidate sparkle.
+
+        Factored out of ``detect_watermark`` so each top-K candidate can be scored by
+        the full fusion before one is selected. The gradient NCC correlates
+        Sobel-magnitude maps (shape fidelity, contrast-robust); the variance score
+        rewards a flat overlay region against the row band above it.
+        """
+        h, w = image.shape[:2]
+        x1, y1 = pos_x, pos_y
+        x2, y2 = min(w, x1 + scale), min(h, y1 + scale)
+        region = image[y1:y2, x1:x2]
+        gray_region = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY) if region.ndim == 3 and region.shape[2] >= 3 else region
+        gray_f = gray_region.astype(np.float32) / 255.0
+        alpha_region = self.get_interpolated_alpha(scale)[: y2 - y1, : x2 - x1]
+
+        # ── Gradient NCC ──
+        img_gmag = cv2.magnitude(
+            cv2.Sobel(gray_f, cv2.CV_32F, 1, 0, ksize=3), cv2.Sobel(gray_f, cv2.CV_32F, 0, 1, ksize=3)
+        )
+        alpha_gmag = cv2.magnitude(
+            cv2.Sobel(alpha_region, cv2.CV_32F, 1, 0, ksize=3), cv2.Sobel(alpha_region, cv2.CV_32F, 0, 1, ksize=3)
+        )
+        _, grad_score, _, _ = cv2.minMaxLoc(cv2.matchTemplate(img_gmag, alpha_gmag, cv2.TM_CCOEFF_NORMED))
+
+        # ── Variance ──
+        var_score = 0.0
+        ref_h = min(y1, scale)
+        if ref_h > 8:
+            ref_region = image[y1 - ref_h : y1, x1:x2]
+            gray_ref = cv2.cvtColor(ref_region, cv2.COLOR_BGR2GRAY) if ref_region.ndim == 3 else ref_region
+            _, s_wm = cv2.meanStdDev(gray_region)
+            _, s_ref = cv2.meanStdDev(gray_ref)
+            if s_ref[0][0] > 5.0:
+                var_score = max(0.0, min(1.0, 1.0 - (s_wm[0][0] / s_ref[0][0])))
+        return float(grad_score), float(var_score)
 
     def _corner_promote(
         self,

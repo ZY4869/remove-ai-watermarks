@@ -539,20 +539,72 @@ class TestCornerPromotion:
         assert abs(det.region[0] - self._CORNER[0]) < 16
         assert abs(det.region[1] - self._CORNER[1]) < 16
 
-    def test_promotion_is_what_rescues_it(self, monkeypatch):
-        """Guard the mechanism: disabling the override mislocalizes to the decoy.
+    def test_size_weighted_search_alone_traps_on_the_decoy(self):
+        """Guard the mechanism: the size-weighted argmax ALONE mislocalizes to the decoy.
 
-        Proves the scene genuinely needs the override (so the localization test above
-        is not a fluke): with the gate set unreachable the larger decoy wins.
+        Proves the scene genuinely needs the dual-candidate fusion selection (so the
+        localization test above is not a fluke): replicating the old size-weighted-only
+        pick lands on the larger left-side decoy, while ``detect_watermark`` -- which
+        scores all top-K candidates by full fusion -- lands on the corner sparkle.
         """
         scene = self._scene()
+        h, w = scene.shape[:2]
+        ss = min(min(w, h), 512)
+        sx1, sy1 = max(0, w - ss), max(0, h - ss)
+        gray = cv2.cvtColor(scene[sy1:h, sx1:w], cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+        best = (-1.0, (0, 0))
+        for scale, max_val, max_loc in self.engine._scan_scales(gray):
+            adj = max_val * min(1.0, (scale / 96.0) ** 0.5)
+            if adj > best[0]:
+                best = (adj, max_loc)
+        weighted_region = (sx1 + best[1][0], sy1 + best[1][1])
+        assert not self._in_bottom_right((*weighted_region, 0, 0)), "size-weighted argmax expected to hit the decoy"
+        # The full detector, scoring both candidates by fusion, rescues the corner.
         assert self._in_bottom_right(self.engine.detect_watermark(scene).region)
-        monkeypatch.setattr(GeminiEngine, "_CORNER_PROMOTE_NCC", 2.0)
-        assert not self._in_bottom_right(self.engine.detect_watermark(scene).region), (
-            "decoy expected to win without the override"
-        )
 
     def test_no_promotion_on_clean_flat_image(self):
         """A flat image with no sparkle yields no corner match to promote."""
         flat = np.full((self._H, self._W, 3), 40, dtype=np.uint8)
         assert self.engine._corner_promote(flat, -1.0) is None
+
+    def test_low_gradient_decoy_loses_to_high_gradient_corner_sparkle(self, monkeypatch):
+        """Regression (reporter 2026-06-12, v0.7.2 detected / v0.8-0.11 missed): the
+        256->512 search widening let a large, low-gradient size-weighted match outrank
+        a smaller, high-gradient corner sparkle whose raw NCC (~0.77) sits BELOW the
+        0.85 corner-promote gate -- so a real Gemini sparkle on light bedding read as
+        clean. The detector now scores all top-K candidates by full fusion and keeps
+        the highest; the gradient term (~0.04 on flat content vs ~1.0 on a true
+        sparkle) rescues the corner. Mirrors the real signature:
+        decoy spatial 0.63 / grad 0.04 vs corner spatial 0.78 / grad 0.96.
+        """
+        eng = self.engine
+        size = 500
+        img = np.full((size, size, 3), 225, dtype=np.float32)
+        # Low-gradient smooth bright blob = a content false match the size weight favors.
+        blob = np.zeros((size, size), np.float32)
+        cv2.circle(blob, (89, 89), 60, 1.0, -1)
+        blob = cv2.GaussianBlur(blob, (0, 0), 30)
+        img += (blob * 25)[:, :, None]
+        # A real, high-gradient sparkle in the bottom-right corner.
+        cx, cy, cs = 430, 430, 48
+        tmpl = cv2.resize(eng._alpha_large, (cs, cs), interpolation=cv2.INTER_AREA)
+        a = (tmpl * 0.6)[:, :, None]
+        img[cy : cy + cs, cx : cx + cs] = a * 255.0 + (1.0 - a) * img[cy : cy + cs, cx : cx + cs]
+        img = np.clip(img, 0, 255).astype(np.uint8)
+        dx, dy, ds = 40, 40, 98
+
+        # The two locations carry the real-signature gradient split.
+        assert eng._grad_var_scores(img, ds, dx, dy)[0] < 0.1  # decoy: shape-only, ~0.04
+        assert eng._grad_var_scores(img, cs, cx, cy)[0] > 0.8  # corner sparkle: ~1.0
+
+        def fake_scan(_self, _gray):
+            yield ds, 0.66, (dx, dy)  # large, low-fidelity: size-weighted adj 0.66 -> winner
+            yield cs, 0.80, (cx, cy)  # small sparkle: raw 0.80 but adj 0.57 -> size-weight loses
+
+        monkeypatch.setattr(GeminiEngine, "_scan_scales", fake_scan)
+        det = eng.detect_watermark(img)
+        # Full-fusion selection keeps the high-gradient corner sparkle, not the decoy.
+        assert det.detected
+        assert det.confidence >= 0.5
+        assert abs(det.region[0] - cx) < 4, f"localized to decoy: {det.region}"
+        assert abs(det.region[1] - cy) < 4, f"localized to decoy: {det.region}"
