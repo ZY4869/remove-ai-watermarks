@@ -126,6 +126,14 @@ class TestModelProfiles:
         assert normalize_profile("CONTROLNET") == "controlnet"
 
 
+class _StubImage:
+    """Minimal PIL.Image stand-in: just the ``width``/``height`` the pure helper reads."""
+
+    def __init__(self, width: int, height: int) -> None:
+        self.width = width
+        self.height = height
+
+
 class TestQwenKwargs:
     """_build_qwen_kwargs is pure (no torch); guards the Qwen-Image call shape.
 
@@ -137,17 +145,36 @@ class TestQwenKwargs:
         from remove_ai_watermarks.noai.watermark_remover import _build_qwen_kwargs
 
         gen = object()
-        kwargs = _build_qwen_kwargs("IMG", strength=0.3, num_inference_steps=40, true_cfg_scale=4.0, generator=gen)
+        img = _StubImage(2816, 1536)
+        kwargs = _build_qwen_kwargs(img, strength=0.3, num_inference_steps=40, true_cfg_scale=4.0, generator=gen)
         # Qwen uses true_cfg_scale, NOT SDXL's guidance_scale.
         assert kwargs["true_cfg_scale"] == 4.0
         assert "guidance_scale" not in kwargs
         # The scrub still comes from strength; image + generator pass through.
         assert kwargs["strength"] == 0.3
-        assert kwargs["image"] == "IMG"
+        assert kwargs["image"] is img
         assert kwargs["generator"] is gen
         # Faithful-regeneration prompt + an explicit negative prompt.
         assert kwargs["prompt"]
         assert kwargs["negative_prompt"]
+
+    def test_passes_explicit_aspect_preserving_size(self):
+        # Without height/width the pipeline defaults to 1024x1024 and squishes non-square
+        # input (the abba mixed-seam regression). Both already multiples of 16 -> unchanged.
+        from remove_ai_watermarks.noai.watermark_remover import _build_qwen_kwargs
+
+        kwargs = _build_qwen_kwargs(
+            _StubImage(2816, 1536), strength=0.25, num_inference_steps=40, true_cfg_scale=4.0, generator=None
+        )
+        assert kwargs["width"] == 2816
+        assert kwargs["height"] == 1536
+
+    def test_qwen_target_size_floors_to_multiple_of_16(self):
+        from remove_ai_watermarks.noai.watermark_remover import _qwen_target_size
+
+        assert _qwen_target_size(2816, 1536) == (2816, 1536)  # already /16
+        assert _qwen_target_size(1122, 1402) == (1120, 1392)  # floored
+        assert _qwen_target_size(10, 10) == (16, 16)  # min clamp, never 0
 
     def test_qwen_model_id_is_qwen_image(self):
         from remove_ai_watermarks.noai.watermark_profiles import QWEN_MODEL_ID
@@ -159,15 +186,33 @@ class TestResolveStrength:
     """resolve_strength applies the vendor default only when strength is unset."""
 
     def test_none_is_vendor_adaptive(self):
-        # No vendor -> unknown default; OpenAI lower, Google == unknown. The SAME ladder
-        # applies to both pipelines (the certified controlnet floors), so there is no
-        # pipeline argument.
+        # No vendor -> unknown default; OpenAI lower, Google == unknown. The sdxl/controlnet
+        # pipelines share this ladder (the certified controlnet floors); qwen has its own
+        # (see test_qwen_pipeline_uses_its_own_higher_ladder).
         assert resolve_strength(None) == UNKNOWN_STRENGTH
         assert resolve_strength(None, "openai") == OPENAI_STRENGTH
         assert resolve_strength(None, "google") == GEMINI_STRENGTH
         assert resolve_strength(None, None) == UNKNOWN_STRENGTH
         # An unrecognized vendor string falls through to the unknown default.
         assert resolve_strength(None, "adobe") == UNKNOWN_STRENGTH
+        # sdxl/controlnet pipelines (and the "default" alias) use the same shared ladder.
+        assert resolve_strength(None, "google", "controlnet") == GEMINI_STRENGTH
+        assert resolve_strength(None, "google", "sdxl") == GEMINI_STRENGTH
+
+    def test_qwen_pipeline_uses_its_own_higher_ladder(self):
+        # Qwen's certified Gemini floor (0.25) is HIGHER than controlnet's (0.15); OpenAI
+        # matches (0.10). Unknown vendor on qwen tracks the higher Gemini value. This retires
+        # the old manual "pass --strength 0.25 for Gemini on qwen" workaround.
+        from remove_ai_watermarks.noai.watermark_profiles import QWEN_GEMINI_STRENGTH, QWEN_OPENAI_STRENGTH
+
+        assert QWEN_GEMINI_STRENGTH == 0.25
+        assert QWEN_OPENAI_STRENGTH == 0.10
+        assert resolve_strength(None, "google", "qwen") == QWEN_GEMINI_STRENGTH
+        assert resolve_strength(None, "openai", "qwen") == QWEN_OPENAI_STRENGTH
+        assert resolve_strength(None, None, "qwen") == QWEN_GEMINI_STRENGTH  # unknown -> higher floor
+        assert resolve_strength(None, "google", "qwen") > resolve_strength(None, "google", "controlnet")
+        # An explicit strength still wins on qwen.
+        assert resolve_strength(0.12, "google", "qwen") == 0.12
 
     def test_ladder_is_the_certified_controlnet_floors(self):
         # The unified ladder == the oracle-certified controlnet floors. Lowered on the

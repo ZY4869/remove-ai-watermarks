@@ -18,9 +18,10 @@ DEFAULT_MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
 # oracle floors (2026-06-20): OpenAI **0.10** (seed-robust -- clean on seeds 0-4) and
 # Google/Gemini **0.25** (seed 0 verified on 2 images; pin a seed in prod, the Gemini
 # oracle rate-limits volume seed-repeat). The Gemini floor (0.25) is HIGHER than the
-# certified controlnet Gemini floor (0.15), and ``resolve_strength`` is shared/
-# pipeline-independent, so pass an explicit ``--strength 0.25`` for Gemini content on
-# this pipeline until a Qwen-specific ladder is wired into ``resolve_strength``.
+# certified controlnet Gemini floor (0.15); ``resolve_strength(..., pipeline="qwen")``
+# now carries this via ``_QWEN_VENDOR_STRENGTH`` (below), so ``--pipeline qwen`` gets the
+# right floor automatically -- the old manual "pass --strength 0.25 for Gemini on qwen"
+# workaround is retired.
 # (Dispatch uses the bare "qwen" literal, matching the sdxl/controlnet sites, so there
 # is no QWEN_PROFILE constant -- only the model id is referenced from code.)
 QWEN_MODEL_ID = "Qwen/Qwen-Image"
@@ -90,6 +91,18 @@ DEFAULT_STRENGTH = UNKNOWN_STRENGTH
 # Detected-vendor -> default strength. Vendor strings come from `vendor_for_strength`.
 _VENDOR_STRENGTH = {"openai": OPENAI_STRENGTH, "google": GEMINI_STRENGTH}
 
+# Qwen has its OWN certified floors (Modal A100-80GB, 2026-06-20), DIFFERENT from the
+# SDXL ladder above: OpenAI 0.10 (seed-robust), Gemini 0.25 (HIGHER than controlnet's
+# 0.15 -- the 20B MMDiT perturbs less per denoising step, so it needs more strength to
+# clear Gemini SynthID). Unknown vendor tracks the higher (Gemini) value, safe-by-default.
+# `resolve_strength(..., pipeline="qwen")` uses this table so `--pipeline qwen` carries the
+# right floor automatically -- retiring the old manual "pass --strength 0.25 for Gemini on
+# qwen" workaround.
+QWEN_OPENAI_STRENGTH = 0.10
+QWEN_GEMINI_STRENGTH = 0.25
+QWEN_UNKNOWN_STRENGTH = 0.25
+_QWEN_VENDOR_STRENGTH = {"openai": QWEN_OPENAI_STRENGTH, "google": QWEN_GEMINI_STRENGTH}
+
 
 def strength_default_help() -> str:
     """One-line description of the vendor-adaptive default, derived from the constants.
@@ -103,20 +116,24 @@ def strength_default_help() -> str:
     )
 
 
-def resolve_strength(strength: float | None, vendor: str | None = None) -> float:
+def resolve_strength(strength: float | None, vendor: str | None = None, pipeline: str | None = None) -> float:
     """Resolve the denoising strength, applying the vendor default when unset.
 
     ``None`` means "the user did not pass ``--strength``", which resolves
     **vendor-adaptively**: ``vendor`` (``"openai"`` / ``"google"`` / None, from
-    ``vendor_for_strength``) selects ``OPENAI_STRENGTH`` / ``GEMINI_STRENGTH`` /
-    ``UNKNOWN_STRENGTH``. The same ladder applies to both pipelines (see the module
-    comment for why one ladder is correct). An explicit value always wins (including
+    ``vendor_for_strength``) selects the per-vendor floor. The ``sdxl`` and ``controlnet``
+    pipelines share ONE ladder (``OPENAI_STRENGTH`` / ``GEMINI_STRENGTH`` /
+    ``UNKNOWN_STRENGTH`` -- see the module comment for why); ``qwen`` has its OWN higher
+    ladder (``_QWEN_VENDOR_STRENGTH``, Gemini 0.25 vs controlnet 0.15), selected when
+    ``pipeline`` normalizes to ``"qwen"``. An explicit value always wins (including
     ``0.0`` -- the check is ``is None``, not falsiness). Shared by the CLI (for display)
     and the engine (for execution) so the two never disagree -- both must pass the SAME
-    ``vendor``.
+    ``vendor`` and ``pipeline``.
     """
     if strength is not None:
         return strength
+    if pipeline is not None and normalize_profile(pipeline) == "qwen":
+        return _QWEN_VENDOR_STRENGTH.get(vendor or "", QWEN_UNKNOWN_STRENGTH)
     return _VENDOR_STRENGTH.get(vendor or "", UNKNOWN_STRENGTH)
 
 

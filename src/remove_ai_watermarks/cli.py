@@ -762,7 +762,7 @@ def cmd_invisible(
     vendor = vendor_for_strength(source)
     console.print(f"  Input:    {source.name}")
     console.print(f"  Pipeline: {pipeline}")
-    console.print(f"  Strength: {resolve_strength(strength, vendor)}  Steps: {steps}")
+    console.print(f"  Strength: {resolve_strength(strength, vendor, pipeline)}  Steps: {steps}")
 
     t0 = time.monotonic()
     result_path = engine.remove_watermark(
@@ -1075,7 +1075,7 @@ def cmd_all(
             # already lost its C2PA to the visible-removal pass, so reading it would
             # always resolve to the unknown-vendor default.
             vendor = vendor_for_strength(source)
-            console.print(f"    Strength: {resolve_strength(strength, vendor)}  Steps: {steps}")
+            console.print(f"    Strength: {resolve_strength(strength, vendor, pipeline)}  Steps: {steps}")
             inv_engine.remove_watermark(
                 image_path=tmp_path,
                 output_path=tmp_path,

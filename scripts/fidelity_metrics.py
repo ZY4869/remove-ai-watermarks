@@ -186,16 +186,50 @@ def _lap_var(bgr: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
-def _match_face(orig_face: Any, variant_faces: list[Any]) -> Any:
-    """Nearest variant face to an original face by bbox-center distance (geometry kept)."""
-    ox, oy = (orig_face.bbox[0] + orig_face.bbox[2]) / 2, (orig_face.bbox[1] + orig_face.bbox[3]) / 2
-    best, best_d = None, 1e18
-    for vf in variant_faces:
-        vx, vy = (vf.bbox[0] + vf.bbox[2]) / 2, (vf.bbox[1] + vf.bbox[3]) / 2
-        d = (ox - vx) ** 2 + (oy - vy) ** 2
-        if d < best_d:
-            best, best_d = vf, d
-    return best
+def _bbox_center(bbox: Any) -> tuple[float, float]:
+    return (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+
+
+def _bbox_diag(bbox: Any) -> float:
+    return float(((bbox[2] - bbox[0]) ** 2 + (bbox[3] - bbox[1]) ** 2) ** 0.5)
+
+
+def assign_faces_one_to_one(
+    ref_centers: list[tuple[float, float]],
+    var_centers: list[tuple[float, float]],
+    ref_diags: list[float],
+    max_frac: float = 0.6,
+) -> dict[int, int]:
+    """One-to-one nearest-center face assignment (pure; unit-tested without insightface).
+
+    Per-face nearest matching collides on multi-face images -- two original faces can both
+    pick the SAME variant face (e.g. when regeneration drops a face, so the variant has fewer
+    detections), corrupting the identity metric (the lapvar/LPIPS metrics are immune: they are
+    anchored to the ORIGINAL bbox on both images). This greedy-by-distance assignment is
+    collision-free: it walks candidate pairs nearest-first and never reuses a ref or a variant
+    face. Faces are spatially well-separated, so greedy equals the optimal (Hungarian) result
+    here without the scipy dependency. A pair is dropped when the center distance exceeds
+    ``max_frac`` of the original face diagonal (no plausible match -- the face was lost).
+
+    Returns a dict mapping ref-face index -> variant-face index for matched faces only.
+    """
+    pairs: list[tuple[float, int, int]] = []
+    for i, (rx, ry) in enumerate(ref_centers):
+        for j, (vx, vy) in enumerate(var_centers):
+            pairs.append((((rx - vx) ** 2 + (ry - vy) ** 2) ** 0.5, i, j))
+    pairs.sort()
+    used_ref: set[int] = set()
+    used_var: set[int] = set()
+    matched: dict[int, int] = {}
+    for dist, i, j in pairs:
+        if i in used_ref or j in used_var:
+            continue
+        if dist > max_frac * ref_diags[i]:
+            continue
+        matched[i] = j
+        used_ref.add(i)
+        used_var.add(j)
+    return matched
 
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
@@ -325,15 +359,19 @@ def compare(original: str, variants: tuple[str, ...], ocr_langs: str, ground_tru
         app.prepare(ctx_id=-1, det_size=(640, 640))
         ref_faces = app.get(ref)
         if ref_faces:
+            ref_centers = [_bbox_center(of.bbox) for of in ref_faces]
+            ref_diags = [_bbox_diag(of.bbox) for of in ref_faces]
             for label, img in parsed:
                 vfaces = app.get(img)
                 st = face_stats[label]
-                for of in ref_faces:
-                    vf = _match_face(of, vfaces)
-                    if vf is None:
-                        continue
+                # One-to-one assignment for identity (collision-free); lapvar/LPIPS stay
+                # anchored to the original bbox below, so they need no match.
+                matched = assign_faces_one_to_one(ref_centers, [_bbox_center(vf.bbox) for vf in vfaces], ref_diags)
+                for oi, of in enumerate(ref_faces):
                     st.n_faces += 1
-                    st.identity.append(_cosine(of.normed_embedding, vf.normed_embedding))
+                    vf = vfaces[matched[oi]] if oi in matched else None
+                    if vf is not None:
+                        st.identity.append(_cosine(of.normed_embedding, vf.normed_embedding))
                     oc, vc = _crop(ref, of.bbox), _crop(img, of.bbox)
                     if oc.size == 0 or vc.size == 0:
                         continue

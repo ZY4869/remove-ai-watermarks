@@ -29,6 +29,73 @@ the 20B cost. None of the improvements has measured face-fidelity numbers at our
 scrub floors yet, so each must be validated with `scripts/fidelity_metrics.py` plus
 the oracle before shipping.
 
+## Follow-up: ControlNet experiment + deeper research (2026-06-20)
+
+The verdict's strongest lead -- adding a Qwen-Image ControlNet -- was **built, measured, and
+CLOSED**.
+
+**Experiment** (Modal A100-80GB; DiffSynth-Studio `QwenImagePipeline` + the Apache-2.0
+`DiffSynth-Studio/Qwen-Image-Blockwise-ControlNet-Canny` -- the only framework exposing
+Qwen-Image + canny ControlNet + img2img `denoising_strength` in ONE call; diffusers ships no
+`QwenImageControlNetImg2ImgPipeline`, its three Qwen ControlNet pipelines are txt2img only).
+Measured on `gemini_3` (18 faces) at the Gemini scrub floor 0.25 vs base-Qwen 0.25 with
+`scripts/fidelity_metrics.py`:
+- **The actual failure mode (face skin texture) was NOT restored:** Laplacian-variance
+  retention stayed flat (base 0.40 -> qwen+canny 0.40; per-face 13/16 within +-0.02 after a
+  one-to-one face match, sd 0.016 -- not an averaging artifact). The SDXL+canny target 0.62
+  was not approached.
+- Identity rose modestly and broadly (ArcFace 0.346 -> 0.415, 12/16 faces improved) but the
+  absolute stays ~0.42 ("a different person, slightly closer").
+- Mechanism (verified, not inferred): canny conditioning was applied fully (scale 1.0, full
+  denoise schedule); the canny edge map is clean facial geometry with BLANK skin (4.83% edge
+  density) -- canny carries edges, not skin grain. Root cause: Qwen's Gemini floor (0.25) is
+  higher than SDXL+canny's (0.15), forcing more denoising -> more smoothing; structure
+  conditioning cannot compensate for that.
+
+**Deeper research** (deep-research harness, 103 agents, 3-vote adversarial):
+- **[high, unanimous] No permissively-licensed Qwen-Image tile / detail / realism / skin
+  ControlNet exists anywhere** -- DiffSynth first-party is Canny/Depth/Inpaint only, InstantX
+  Union is canny/soft-edge/depth/pose, the official QwenLM repo ships none. Every Qwen
+  conditioning is GEOMETRY, the same class as the tested canny. **The "add a Qwen ControlNet to
+  fix faces" lead is closed for good.**
+- **[high, unanimous] Z-Image / Z-Image-Turbo (6B, Apache-2.0 on code AND weights, ~1/3 of
+  Qwen 20B)** ships a documented `ZImageImg2ImgPipeline` with standard strength denoising, so
+  it preserves the scrub mechanism. Its own SynthID scrub floor and face/text fidelity are
+  UNMEASURED -- this is the strongest concrete NEXT experiment.
+- **[medium] Lowering Qwen's scrub floor has no off-the-shelf SynthID answer:** the "partial
+  img2img ~0.3 breaks robust watermarks" literature tests open schemes
+  (StegaStamp/TrustMark/VINE), NEVER SynthID (proprietary decoder) -- analogy, not proof. No
+  minimal-strength SynthID attack under a named permissive license was found.
+- **REFUTED [0-3]:** "re-injecting high-frequency detail from a clean diffusion output would
+  not carry the watermark back." So non-regenerative detail transfer is NOT safe by
+  assumption -- the transferred high-frequency band must be gated against the SynthID oracle.
+
+**Net for the pipeline:** **faces stay on SDXL+controlnet**; there is no Qwen face-fix.
+The live frontier is Z-Image-Turbo (next experiment) and oracle-gated non-regenerative detail
+re-injection.
+
+**Follow-up (2026-06-20) — the content-routed lane / mixed dual-pass was tested and DROPPED.**
+A `--pipeline auto` router (Haar+MSER → text→qwen / faces→controlnet / both→mixed) and a
+faces+text mixed dual-pass (scrub the whole frame on both, graft qwen text regions onto the
+controlnet base) were built and run on Modal (the abba poster: faces + display text). On that
+canonical faces+text case **controlnet won EVERY metric, including text** (CER 0.114 vs qwen
+0.379; ID 0.64 vs 0.36) — canny holds existing letter shapes, qwen re-renders display text and
+garbles it, so grafting qwen text only hurts. Qwen beats controlnet on text ONLY for clean body
+text on a plain background with no faces (openai_1/2), a niche `--pipeline qwen` alone covers;
+the faces+clean-body-text intersection is near-empty, and "text→qwen" is undecidable cheaply
+(body-vs-display text is what matters). So the router + mixed modules were removed and **`qwen`
+is a manual `--pipeline qwen` opt-in only.** KEPT (independently valid): the qwen geometry fix
+(it squished non-square inputs to 1024²), the pipeline-aware `resolve_strength` Qwen ladder, and
+the `fidelity_metrics.py` one-to-one face matcher below.
+
+**Tooling fix surfaced by this run:** `scripts/fidelity_metrics.py` face matching was changed
+from per-face nearest-center to a collision-free one-to-one assignment
+(`assign_faces_one_to_one`, gated by face size), after the 18-face `gemini_3` exposed
+collisions (the regenerated variants detected 17 faces, so two originals mapped to the same
+variant face, corrupting the identity metric). lapvar/LPIPS were always anchored to the
+original bbox and stayed collision-immune. Regression-guarded by
+`tests/test_fidelity_matching.py`.
+
 ## Findings
 
 1. **[high, 3-0] A permissively-licensed Qwen-Image ControlNet exists today and is

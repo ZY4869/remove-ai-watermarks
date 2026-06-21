@@ -322,6 +322,15 @@ _QWEN_PROMPT = "high quality, sharp, detailed, faithful to the original"
 _QWEN_NEGATIVE = "blurry, lowres, distorted text, garbled text, artifacts"
 
 
+def _qwen_target_size(width: int, height: int) -> tuple[int, int]:
+    """Floor (width, height) to a multiple of 16 for Qwen's VAE/patchifier (>= 16).
+
+    Pure; unit-tested. Without explicit dims the img2img pipeline defaults to a 1024x1024
+    SQUARE and silently distorts any non-square input.
+    """
+    return max(16, (width // 16) * 16), max(16, (height // 16) * 16)
+
+
 def _build_qwen_kwargs(
     image: Image.Image, strength: float, num_inference_steps: int, true_cfg_scale: float, generator: Any
 ) -> dict[str, Any]:
@@ -329,7 +338,12 @@ def _build_qwen_kwargs(
 
     Qwen-Image uses ``true_cfg_scale`` (not SDXL's ``guidance_scale``) and takes an
     explicit ``negative_prompt``; the scrub still comes from the img2img ``strength``.
+    Passes an explicit ``height``/``width`` derived from the input (floored to /16): the
+    pipeline otherwise defaults to a 1024x1024 SQUARE, squishing any non-square input
+    (the abba mixed-seam test: a 2816x1536 poster came back 1024x1024, distorting the
+    scene and garbling text). So qwen regenerates at the input's own geometry.
     """
+    qw, qh = _qwen_target_size(image.width, image.height)
     return {
         "prompt": _QWEN_PROMPT,
         "negative_prompt": _QWEN_NEGATIVE,
@@ -338,6 +352,8 @@ def _build_qwen_kwargs(
         "num_inference_steps": num_inference_steps,
         "true_cfg_scale": true_cfg_scale,
         "generator": generator,
+        "height": qh,
+        "width": qw,
     }
 
 
@@ -614,7 +630,7 @@ class WatermarkRemover:
         if output_path is None:
             output_path = image_path
 
-        strength = resolve_strength(strength, vendor)
+        strength = resolve_strength(strength, vendor, self.model_profile)
 
         if not 0.0 <= strength <= 1.0:
             raise ValueError(f"Strength must be between 0.0 and 1.0, got {strength}")

@@ -50,3 +50,6 @@ data/samsung_capture/captures/samsung_content_*
 # (GFPGAN wrote RetinaFace/parsing weights to a CWD ./gfpgan/weights/ working
 # dir on first use). Runtime artifact, never committed.
 gfpgan/
+
+# Qwen ControlNet experiment outputs (throwaway eval; never the committed corpus)
+scripts/_qwen_exp_out/
